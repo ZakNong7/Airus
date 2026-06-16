@@ -1,0 +1,69 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(airus_native VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# =============================================================
+# 1. Tambahkan Oboe sebagai dependency (fetch dari GitHub)
+# =============================================================
+include(FetchContent)
+FetchContent_Declare(
+        oboe
+        GIT_REPOSITORY https://github.com/google/oboe.git
+        GIT_TAG        1.9.3
+)
+FetchContent_MakeAvailable(oboe)
+
+# =============================================================
+# 2. Source files Native Engine
+# =============================================================
+add_library(
+        airus_engine
+        SHARED
+        airus_engine.cpp
+        audio/OboeEngine.cpp
+        audio/GaplessPlayer.cpp
+        audio/UsbAudioDriver.cpp
+        dsp/ParametricEQ.cpp
+        dsp/ReplayGain.cpp
+        dsp/Crossfeed.cpp
+        decoder/FlacDecoder.cpp
+        decoder/WavDecoder.cpp
+        decoder/DsdDecoder.cpp
+)
+
+# =============================================================
+# 3. Include directories
+# =============================================================
+target_include_directories(airus_engine PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${oboe_SOURCE_DIR}/include
+)
+
+# =============================================================
+# 4. Link libraries
+# =============================================================
+find_library(log-lib log)
+find_library(android-lib android)
+
+target_link_libraries(
+        airus_engine
+        oboe                # Oboe audio engine
+        ${log-lib}          # Android logging
+        ${android-lib}      # Android native APIs
+        OpenSLES            # fallback audio (Android < 8)
+)
+
+# =============================================================
+# 5. Compiler flags untuk DSP performance
+# =============================================================
+target_compile_options(airus_engine PRIVATE
+        -O2
+        -ffast-math
+        -fno-exceptions     # reduce binary size
+)
+
+if(ANDROID_ABI STREQUAL "armeabi-v7a")
+    target_compile_options(airus_engine PRIVATE -mfpu=neon)
+endif()

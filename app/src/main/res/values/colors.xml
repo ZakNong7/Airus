@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ===== AMOLED Black Base ===== -->
+    <color name="black_true">#FF000000</color>     <!-- true AMOLED black -->
+    <color name="black_surface">#FF0A0A0A</color>  <!-- card surface -->
+    <color name="black_elevated">#FF141414</color> <!-- elevated element -->
+    <color name="black_border">#FF1E1E1E</color>   <!-- divider/border -->
+
+    <!-- ===== Text ===== -->
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#B3FFFFFF</color>  <!-- 70% white -->
+    <color name="text_tertiary">#66FFFFFF</color>   <!-- 40% white -->
+
+    <!-- ===== Accent (Audiophile Amber) ===== -->
+    <color name="accent_primary">#FFEFB000</color>   <!-- amber gold -->
+    <color name="accent_secondary">#FFB8860B</color> <!-- darker gold -->
+    <color name="accent_glow">#33EFB000</color>      <!-- amber glow overlay -->
+
+    <!-- ===== Status ===== -->
+    <color name="color_playing">#FF4CAF50</color>    <!-- green - playing -->
+    <color name="color_hires">#FF2196F3</color>      <!-- blue - hi-res badge -->
+    <color name="color_dsd">#FFFF9800</color>        <!-- orange - DSD badge -->
+    <color name="color_bitperfect">#FF9C27B0</color> <!-- purple - bit-perfect active -->
+</resources>

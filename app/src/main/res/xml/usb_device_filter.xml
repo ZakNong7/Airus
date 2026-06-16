@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        USB Audio Class (UAC) Device Filter
+        class=1   : Audio device
+        subclass=1: Audio Control
+        subclass=2: Audio Streaming
+    -->
+    <usb-device class="1" subclass="1" />
+    <usb-device class="1" subclass="2" />
+    <!-- Vendor-specific (beberapa DAC menggunakan class=0xFF) -->
+    <usb-device class="255" />
+</resources>
