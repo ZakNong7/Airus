@@ -1,0 +1,420 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    NowPlaying — full screen bottom sheet.
+    Layout: album art dominan, kontrol di bawah, info overlay di atas art.
+-->
+<androidx.coordinatorlayout.widget.CoordinatorLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/black_true">
+
+    <!-- Scrollable content -->
+    <androidx.core.widget.NestedScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingBottom="32dp">
+
+            <!-- ============================================
+                 DRAG HANDLE — indikator bottom sheet
+                 ============================================ -->
+            <View
+                android:id="@+id/drag_handle"
+                android:layout_width="40dp"
+                android:layout_height="4dp"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_drag_handle"
+                app:layout_constraintTop_toTopOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"/>
+
+            <!-- ============================================
+                 HEADER — judul halaman + tombol EQ
+                 ============================================ -->
+            <TextView
+                android:id="@+id/label_now_playing"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:text="Now Playing"
+                android:textColor="@color/text_tertiary"
+                android:textSize="12sp"
+                android:letterSpacing="0.15"
+                android:textAllCaps="true"
+                app:layout_constraintTop_toBottomOf="@id/drag_handle"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"/>
+
+            <!-- Tombol EQ — pojok kanan -->
+            <ImageButton
+                android:id="@+id/btn_eq"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginEnd="16dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_eq"
+                android:tint="@color/text_secondary"
+                app:layout_constraintTop_toTopOf="@id/label_now_playing"
+                app:layout_constraintBottom_toBottomOf="@id/label_now_playing"
+                app:layout_constraintEnd_toEndOf="parent"/>
+
+            <!-- Tombol queue — pojok kiri -->
+            <ImageButton
+                android:id="@+id/btn_queue"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginStart="16dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_playlist"
+                android:tint="@color/text_secondary"
+                app:layout_constraintTop_toTopOf="@id/label_now_playing"
+                app:layout_constraintBottom_toBottomOf="@id/label_now_playing"
+                app:layout_constraintStart_toStartOf="parent"/>
+
+            <!-- ============================================
+                 ALBUM ART — dominan, square, rounded corner
+                 ============================================ -->
+            <androidx.cardview.widget.CardView
+                android:id="@+id/card_album_art"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:layout_marginTop="24dp"
+                android:layout_marginStart="32dp"
+                android:layout_marginEnd="32dp"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="16dp"
+                app:cardBackgroundColor="@color/black_elevated"
+                app:layout_constraintTop_toBottomOf="@id/label_now_playing"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintDimensionRatio="1:1">
+
+                <ImageView
+                    android:id="@+id/album_art"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:scaleType="centerCrop"
+                    android:src="@drawable/ic_default_album_art"/>
+
+            </androidx.cardview.widget.CardView>
+
+            <!-- ============================================
+                 AUDIO INFO OVERLAY
+                 Badge format: "FLAC 24/96" "◆ Bit-Perfect" "DSD128"
+                 Posisi: pojok kanan bawah album art
+                 ============================================ -->
+            <LinearLayout
+                android:id="@+id/audio_info_overlay"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="40dp"
+                android:layout_marginBottom="8dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:spacing="4dp"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintBottom_toBottomOf="@id/card_album_art">
+
+                <!-- Badge format: "FLAC 24/96" -->
+                <TextView
+                    android:id="@+id/badge_format"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp"
+                    android:paddingTop="3dp"
+                    android:paddingBottom="3dp"
+                    android:layout_marginEnd="4dp"
+                    android:background="@drawable/bg_badge"
+                    android:textColor="@color/accent_primary"
+                    android:textSize="10sp"
+                    android:textStyle="bold"
+                    android:text="FLAC 24/96"/>
+
+                <!-- Badge bit-perfect: "◆ BP" -->
+                <TextView
+                    android:id="@+id/badge_bitperfect"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp"
+                    android:paddingTop="3dp"
+                    android:paddingBottom="3dp"
+                    android:background="@drawable/bg_badge_bitperfect"
+                    android:textColor="@color/color_bitperfect"
+                    android:textSize="10sp"
+                    android:textStyle="bold"
+                    android:text="◆ BIT-PERFECT"/>
+
+            </LinearLayout>
+
+            <!-- ============================================
+                 JUDUL + ARTIS + FAVORITE
+                 ============================================ -->
+            <TextView
+                android:id="@+id/tv_title"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="28dp"
+                android:layout_marginStart="32dp"
+                android:layout_marginEnd="16dp"
+                android:ellipsize="marquee"
+                android:marqueeRepeatLimit="marquee_forever"
+                android:singleLine="true"
+                android:textColor="@color/text_primary"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                app:layout_constraintTop_toBottomOf="@id/card_album_art"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintEnd_toStartOf="@id/btn_favorite"/>
+
+            <TextView
+                android:id="@+id/tv_artist"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:layout_marginStart="32dp"
+                android:layout_marginEnd="16dp"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:textColor="@color/accent_primary"
+                android:textSize="14sp"
+                app:layout_constraintTop_toBottomOf="@id/tv_title"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintEnd_toStartOf="@id/btn_favorite"/>
+
+            <!-- Tombol favorit -->
+            <ImageButton
+                android:id="@+id/btn_favorite"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginEnd="28dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_favorite_off"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="@id/tv_title"
+                app:layout_constraintBottom_toBottomOf="@id/tv_artist"/>
+
+            <!-- ============================================
+                 SEEKBAR + TIMESTAMP
+                 ============================================ -->
+            <SeekBar
+                android:id="@+id/seekbar"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:layout_marginStart="28dp"
+                android:layout_marginEnd="28dp"
+                android:progressTint="@color/accent_primary"
+                android:thumb="@drawable/seekbar_thumb"
+                android:progressBackgroundTint="@color/black_border"
+                app:layout_constraintTop_toBottomOf="@id/tv_artist"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"/>
+
+            <TextView
+                android:id="@+id/tv_position"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:layout_marginStart="32dp"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp"
+                android:text="0:00"
+                app:layout_constraintTop_toBottomOf="@id/seekbar"
+                app:layout_constraintStart_toStartOf="parent"/>
+
+            <TextView
+                android:id="@+id/tv_duration"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:layout_marginEnd="32dp"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp"
+                android:text="0:00"
+                app:layout_constraintTop_toBottomOf="@id/seekbar"
+                app:layout_constraintEnd_toEndOf="parent"/>
+
+            <!-- ============================================
+                 KONTROL UTAMA — prev / play-pause / next
+                 ============================================ -->
+            <LinearLayout
+                android:id="@+id/controls_main"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:layout_marginStart="16dp"
+                android:layout_marginEnd="16dp"
+                android:orientation="horizontal"
+                android:gravity="center"
+                app:layout_constraintTop_toBottomOf="@id/tv_position"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintEnd_toEndOf="parent">
+
+                <!-- Shuffle -->
+                <ImageButton
+                    android:id="@+id/btn_shuffle"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_shuffle"
+                    android:tint="@color/text_tertiary"/>
+
+                <!-- Previous -->
+                <ImageButton
+                    android:id="@+id/btn_previous"
+                    android:layout_width="56dp"
+                    android:layout_height="56dp"
+                    android:layout_marginStart="8dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_previous"
+                    android:tint="@color/text_primary"/>
+
+                <!-- Play / Pause — lebih besar dari yang lain -->
+                <ImageButton
+                    android:id="@+id/btn_play_pause"
+                    android:layout_width="72dp"
+                    android:layout_height="72dp"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginEnd="4dp"
+                    android:background="@drawable/bg_play_button"
+                    android:src="@drawable/ic_play"
+                    android:tint="@color/black_true"/>
+
+                <!-- Next -->
+                <ImageButton
+                    android:id="@+id/btn_next"
+                    android:layout_width="56dp"
+                    android:layout_height="56dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_next"
+                    android:tint="@color/text_primary"/>
+
+                <!-- Repeat -->
+                <ImageButton
+                    android:id="@+id/btn_repeat"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_repeat_off"
+                    android:tint="@color/text_tertiary"/>
+
+            </LinearLayout>
+
+            <!-- ============================================
+                 KONTROL SEKUNDER — bit-perfect toggle + crossfeed
+                 ============================================ -->
+            <LinearLayout
+                android:id="@+id/controls_secondary"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:layout_marginStart="32dp"
+                android:layout_marginEnd="32dp"
+                android:orientation="horizontal"
+                android:gravity="center"
+                app:layout_constraintTop_toBottomOf="@id/controls_main"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintEnd_toEndOf="parent">
+
+                <!-- Bit-Perfect toggle — fitur utama Airus -->
+                <LinearLayout
+                    android:id="@+id/btn_bitperfect_container"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:gravity="center"
+                    android:padding="8dp"
+                    android:background="?attr/selectableItemBackgroundBorderless">
+
+                    <ImageView
+                        android:id="@+id/icon_bitperfect"
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:src="@drawable/ic_bitperfect_active"/>
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="Bit-Perfect"
+                        android:textColor="@color/text_tertiary"
+                        android:textSize="10sp"/>
+
+                </LinearLayout>
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1"/>
+
+                <!-- ReplayGain toggle -->
+                <LinearLayout
+                    android:id="@+id/btn_replaygain_container"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:gravity="center"
+                    android:padding="8dp"
+                    android:background="?attr/selectableItemBackgroundBorderless">
+
+                    <ImageView
+                        android:id="@+id/icon_replaygain"
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:src="@drawable/ic_replaygain"/>
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="ReplayGain"
+                        android:textColor="@color/text_tertiary"
+                        android:textSize="10sp"/>
+
+                </LinearLayout>
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1"/>
+
+                <!-- Crossfeed toggle -->
+                <LinearLayout
+                    android:id="@+id/btn_crossfeed_container"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:gravity="center"
+                    android:padding="8dp"
+                    android:background="?attr/selectableItemBackgroundBorderless">
+
+                    <ImageView
+                        android:id="@+id/icon_crossfeed"
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:src="@drawable/ic_crossfeed"/>
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="Crossfeed"
+                        android:textColor="@color/text_tertiary"
+                        android:textSize="10sp"/>
+
+                </LinearLayout>
+
+            </LinearLayout>
+
+        </androidx.constraintlayout.widget.ConstraintLayout>
+    </androidx.core.widget.NestedScrollView>
+
+</androidx.coordinatorlayout.widget.CoordinatorLayout>

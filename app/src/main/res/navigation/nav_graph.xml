@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/nav_graph"
+    app:startDestination="@id/libraryFragment">
+
+    <fragment
+        android:id="@+id/libraryFragment"
+        android:name="com.zaknong.airus.ui.LibraryFragment"
+        android:label="Library"/>
+
+    <fragment
+        android:id="@+id/foldersFragment"
+        android:name="com.zaknong.airus.ui.FolderBrowserFragment"
+        android:label="Folder"/>
+
+    <fragment
+        android:id="@+id/playlistsFragment"
+        android:name="com.zaknong.airus.ui.PlaylistsFragment"
+        android:label="Playlist"/>
+
+</navigation>

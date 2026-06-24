@@ -246,12 +246,12 @@ public class MediaSessionManager {
                 .addCustomAction(new PlaybackStateCompat.CustomAction.Builder(
                         PlayerService.ACTION_TOGGLE_BIT_PERFECT,
                         "Bit-Perfect",
-                        com.zaknong.airus.R.drawable.ic_bitperfect
+                        com.zaknong.airus.R.drawable.ic_bitperfect_active
                 ).build())
                 .addCustomAction(new PlaybackStateCompat.CustomAction.Builder(
                         PlayerService.ACTION_CYCLE_REPEAT,
                         "Repeat",
-                        com.zaknong.airus.R.drawable.ic_repeat
+                        com.zaknong.airus.R.drawable.ic_repeat_off
                 ).build());
 
         mediaSession.setPlaybackState(builder.build());

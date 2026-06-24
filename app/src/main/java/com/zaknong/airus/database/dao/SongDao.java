@@ -177,4 +177,7 @@ public interface SongDao {
     // Tambahkan di SongDao.java:
     @Query("SELECT * FROM songs WHERE sample_rate = 0 AND is_dsd = 0")
     List<Song> getUnenrichedSongs();
+
+    @Query("SELECT * FROM songs WHERE folder_path = :folderPath ORDER BY track_number ASC, file_name ASC")
+    List<Song> getSongsInFolderSync(String folderPath);
 }

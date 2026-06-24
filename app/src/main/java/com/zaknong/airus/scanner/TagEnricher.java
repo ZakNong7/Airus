@@ -179,11 +179,11 @@ public class TagEnricher {
             // ---- Audio Header — informasi teknis ----
             song.sampleRate = header.getSampleRateAsNumber();
             song.bitDepth = parseBitDepth(header);
-            song.channels = header.getChannelCount();
+            song.channels = parseNumber(header.getChannels());
 
             // Bitrate dari header lebih akurat dari MediaStore
             try {
-                song.bitrate = header.getBitRateAsNumber().intValue();
+                song.bitrate = (int) header.getBitRateAsNumber();
             } catch (Exception e) {
                 // Bitrate tidak tersedia untuk beberapa format, biarkan nilai lama
             }
@@ -229,13 +229,13 @@ public class TagEnricher {
                 // ---- ReplayGain Tags ----
                 // Format standar: "REPLAYGAIN_TRACK_GAIN" = "-6.50 dB"
                 song.rgTrackGain = parseReplayGainDb(
-                        getTagField(tag, FieldKey.REPLAYGAIN_TRACK_GAIN, null));
+                        getTagField(tag, "REPLAYGAIN_TRACK_GAIN", null));
                 song.rgTrackPeak = parseReplayGainFloat(
-                        getTagField(tag, FieldKey.REPLAYGAIN_TRACK_PEAK, null));
+                        getTagField(tag, "REPLAYGAIN_TRACK_PEAK", null));
                 song.rgAlbumGain = parseReplayGainDb(
-                        getTagField(tag, FieldKey.REPLAYGAIN_ALBUM_GAIN, null));
+                        getTagField(tag, "REPLAYGAIN_ALBUM_GAIN", null));
                 song.rgAlbumPeak = parseReplayGainFloat(
-                        getTagField(tag, FieldKey.REPLAYGAIN_ALBUM_PEAK, null));
+                        getTagField(tag, "REPLAYGAIN_ALBUM_PEAK", null));
 
                 // ---- Album Art ----
                 extractAndCacheAlbumArt(song, tag);
@@ -329,6 +329,15 @@ public class TagEnricher {
      * Ambil field tag dengan fallback jika field tidak ada.
      */
     private String getTagField(Tag tag, FieldKey key, String fallback) {
+        try {
+            String value = tag.getFirst(key);
+            return (value != null && !value.isEmpty()) ? value : fallback;
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    private String getTagField(Tag tag, String key, String fallback) {
         try {
             String value = tag.getFirst(key);
             return (value != null && !value.isEmpty()) ? value : fallback;

@@ -29,8 +29,9 @@ add_library(
         dsp/ReplayGain.cpp
         dsp/Crossfeed.cpp
         decoder/FlacDecoder.cpp
-        decoder/WavDecoder.cpp
+        decoder/WavDecoder.h
         decoder/DsdDecoder.cpp
+        decoder/WavDecoder.cpp
 )
 
 # =============================================================

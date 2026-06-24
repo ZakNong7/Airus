@@ -12,6 +12,8 @@
 #include <cmath>
 #include <android/log.h>
 #include <oboe/Oboe.h>
+#include "decoder/WavDecoder.h"
+#include <thread>
 
 #define LOG_TAG "AirusEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -323,6 +325,9 @@ public:
     ReplayGainProcessor replayGain;
     GaplessBuffer       gapless;
     PeakMeter           peakMeter;
+    std::unique_ptr<airus::WavDecoder> wavDecoder;
+    std::thread decoderThread;
+    std::atomic<bool> isDecoding{false};
 
     // ---- Oboe ----
     std::shared_ptr<oboe::AudioStream> stream;
@@ -434,15 +439,66 @@ public:
         eq.reset();
         crossfeed.reset();
 
-        // TODO Tahap berikutnya: decode file ke audioBuffer
-        // via DecoderFactory (libFLAC / libavcodec / MediaCodec)
-        // Sementara ini engine sudah siap menerima sample via fillBuffer()
+        // ---- Decode WAV di background thread ----
+        if (fmt == "WAV" || fmt == "AIFF") {
+            isDecoding = true;
 
-        isPlaying = true;
-        isPaused  = false;
-        LOGI("loadAndPlay: %s [%s | %dHz / %dbit]",
-             path.c_str(), fmt.c_str(), sr, bd);
-        return true;
+            // Jalankan decode di thread terpisah
+            // agar tidak block audio callback
+            if (decoderThread.joinable()) decoderThread.join();
+
+            decoderThread = std::thread([this, path, sr, bd]() {
+                airus::WavDecoder decoder;
+                if (!decoder.open(path)) {
+                    LOGE("WavDecoder gagal buka: %s", path.c_str());
+                    isDecoding = false;
+                    callOnError(-1, "Gagal membuka file WAV");
+                    return;
+                }
+
+                // Update info dari header file
+                // (lebih akurat dari database)
+                sampleRate = decoder.getInfo().sampleRate;
+                bitDepth   = decoder.getInfo().bitDepth;
+                channels   = decoder.getInfo().channels;
+                durationMs = (long)(decoder.getInfo().totalFrames
+                                    * 1000L / sampleRate);
+
+                // Decode semua ke buffer
+                // Untuk file besar (>30 menit), gunakan decodeFrames()
+                // secara bertahap. Untuk sekarang decode sekaligus.
+                std::vector<float> decoded;
+                size_t frames = decoder.decodeAll(decoded);
+
+                if (frames == 0) {
+                    LOGE("WavDecoder: tidak ada frame yang didecode");
+                    isDecoding = false;
+                    callOnError(-2, "File WAV kosong atau corrupt");
+                    return;
+                }
+
+                // Salin ke audioBuffer (thread-safe)
+                {
+                    std::lock_guard<std::mutex> lock(bufferMutex);
+                    audioBuffer = std::move(decoded);
+                    readPos     = 0;
+                }
+
+                isDecoding  = false;
+                isPlaying   = true;
+                isPaused    = false;
+
+                LOGI("WAV decoded: %zu frames → %zu samples",
+                     frames, audioBuffer.size());
+            });
+
+            decoderThread.detach();
+            return true;
+        }
+
+        // Format lain (FLAC, MediaCodec) — akan diisi Tahap 6B dan 6C
+        LOGI("Format %s belum didukung — coming soon", fmt.c_str());
+        return false;
     }
 
     /**

@@ -15,6 +15,7 @@ import androidx.lifecycle.LifecycleService;
 
 import com.zaknong.airus.database.AppDatabase;
 import com.zaknong.airus.database.entity.Song;
+import com.zaknong.airus.engine.AudioEngine;
 import com.zaknong.airus.engine.AudioFormatRouter;
 
 import java.util.ArrayList;
@@ -46,6 +47,41 @@ public class PlayerService extends LifecycleService
         MediaSessionManager.Callback {
 
     private static final String TAG = "PlayerService";
+
+    private final AudioEngine.EngineCallback engineCallback =
+            new AudioEngine.EngineCallback() {
+
+                @Override
+                public void onTrackCompleted() {
+                    // Sudah di main thread (di-dispatch Handler di AudioEngine.java)
+                    skipToNext();
+                }
+
+                @Override
+                public void onNearingEnd(long remainingMs) {
+                    // Preload lagu berikutnya untuk gapless
+                    Song next = getNextSong();
+                    if (next == null) return;
+                    AudioFormatRouter.FormatInfo info =
+                            AudioFormatRouter.getFormatInfo(next.filePath);
+                    if (info != null) {
+                        audioEngine.preloadNextTrack(next.filePath, info.displayName);
+                    }
+                }
+
+                @Override
+                public void onError(int errorCode, String message) {
+                    Log.e(TAG, "Engine error " + errorCode + ": " + message);
+                    playerState.setPlaybackState(PlayerState.State.ERROR);
+                    playerState.setLastError(PlayerState.PlayerError.DECODE_ERROR);
+                }
+
+                @Override
+                public void onSampleRateChanged(int sampleRate, int bitDepth) {
+                    playerState.setActiveSampleRate(sampleRate);
+                    playerState.setActiveBitDepth(bitDepth);
+                }
+            };
 
     // =========================================================
     // Action Constants — digunakan oleh NotificationBuilder
@@ -91,6 +127,7 @@ public class PlayerService extends LifecycleService
     private MediaSessionManager mediaSessionManager;
     private NotificationBuilder notificationBuilder;
     private AppDatabase database;
+    private AudioEngine audioEngine;
 
     // AudioEngine akan ditambahkan di Tahap 4 (JNI):
     // private AudioEngine audioEngine;
@@ -126,10 +163,11 @@ public class PlayerService extends LifecycleService
         @Override
         public void run() {
             if (playerState.isPlaying()) {
-                // Tahap 4: posisi dari AudioEngine.getPositionMs()
-                // Sementara ini placeholder:
-                // playerState.setPosition(audioEngine.getPositionMs());
-                positionHandler.postDelayed(this, 500); // update tiap 500ms
+                long pos = audioEngine.getPositionMs();
+                playerState.setPosition(pos);
+                mediaSessionManager.setPlaybackState(
+                        PlaybackStateCompat.STATE_PLAYING, pos, 1.0f);
+                positionHandler.postDelayed(this, 500);
             }
         }
     };
@@ -156,6 +194,10 @@ public class PlayerService extends LifecycleService
         // audioEngine.initialize();
 
         registerNotificationReceiver();
+
+        audioEngine = new AudioEngine();
+        audioEngine.initialize();
+        audioEngine.setEngineCallback(engineCallback);
 
         // Observe bit-perfect state untuk update notification
         playerState.isBitPerfectActive().observe(this, isBitPerfect -> {
@@ -199,9 +241,7 @@ public class PlayerService extends LifecycleService
         mediaSessionManager.release();
         notificationBuilder.cancel();
         unregisterNotificationReceiver();
-
-        // Tahap 4: audioEngine.release();
-
+        audioEngine.release();
         playerState.reset();
         super.onDestroy();
     }
@@ -495,13 +535,21 @@ public class PlayerService extends LifecycleService
      * Detail implementasi di Tahap 4.
      */
     private void startMediaCodecPlayback(Song song) {
-        // Tahap 4: audioEngine.playWithMediaCodec(song.filePath);
+        audioEngine.setReplayGain(
+                song.rgTrackGain, song.rgTrackPeak,
+                song.rgAlbumGain, song.rgAlbumPeak,
+                false
+        );
+        boolean ok = audioEngine.playMediaCodec(song.filePath);
+        if (!ok) {
+            playerState.setPlaybackState(PlayerState.State.ERROR);
+            playerState.setLastError(PlayerState.PlayerError.DECODE_ERROR);
+            return;
+        }
         playerState.setPlaybackState(PlayerState.State.PLAYING);
         mediaSessionManager.setPlaybackState(
                 PlaybackStateCompat.STATE_PLAYING, 0, 1.0f);
         refreshNotification();
-        Log.d(TAG, "MediaCodec path: " + song.filePath);
-
     }
 
     /**
@@ -511,13 +559,22 @@ public class PlayerService extends LifecycleService
      * Detail implementasi di Tahap 4.
      */
     private void startNativePlayback(Song song,
-                                     AudioFormatRouter.FormatInfo formatInfo) {
-        // Tahap 4: audioEngine.playNative(song.filePath, formatInfo);
+                                     AudioFormatRouter.FormatInfo info) {
+        audioEngine.setReplayGain(
+                song.rgTrackGain, song.rgTrackPeak,
+                song.rgAlbumGain, song.rgAlbumPeak,
+                false
+        );
+        boolean ok = audioEngine.playNative(song.filePath, info.displayName);
+        if (!ok) {
+            playerState.setPlaybackState(PlayerState.State.ERROR);
+            playerState.setLastError(PlayerState.PlayerError.DECODE_ERROR);
+            return;
+        }
         playerState.setPlaybackState(PlayerState.State.PLAYING);
         mediaSessionManager.setPlaybackState(
                 PlaybackStateCompat.STATE_PLAYING, 0, 1.0f);
         refreshNotification();
-        Log.d(TAG, "Native path [" + formatInfo.decoderPath + "]: " + song.filePath);
     }
 
     /**
@@ -695,5 +752,20 @@ public class PlayerService extends LifecycleService
     public Song getCurrentSong()    {
         if (queue.isEmpty() || currentIndex >= queue.size()) return null;
         return queue.get(currentIndex);
+    }
+    private Song getNextSong() {
+        if (queue.isEmpty()) return null;
+        PlayerState.RepeatMode repeat =
+                playerState.getRepeatMode().getValue();
+        if (repeat == PlayerState.RepeatMode.ONE) {
+            return queue.get(currentIndex);
+        }
+        int nextIndex = currentIndex + 1;
+        if (nextIndex < queue.size()) return queue.get(nextIndex);
+        if (repeat == PlayerState.RepeatMode.ALL) return queue.get(0);
+        return null;
+    }
+    public AudioEngine getAudioEngine() {
+        return audioEngine;
     }
 }

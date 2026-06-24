@@ -2,6 +2,7 @@ package com.zaknong.airus.database.dao;
 
 import androidx.lifecycle.LiveData;
 import androidx.room.Dao;
+import androidx.room.Delete;
 import androidx.room.Insert;
 import androidx.room.OnConflictStrategy;
 import androidx.room.Query;
@@ -15,20 +16,26 @@ import java.util.List;
 public interface AlbumDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    long insert(Album album);
+    long insertAlbum(Album album);
 
     @Update
-    void update(Album album);
+    void updateAlbum(Album album);
 
-    @Query("SELECT * FROM albums WHERE id = :id")
-    Album getAlbumById(long id);
-
-    @Query("SELECT id FROM albums WHERE album_name = :title AND album_artist = :artist LIMIT 1")
-    Long getAlbumIdByTitleAndArtist(String title, String artist);
-
-    @Query("SELECT COUNT(*) FROM albums")
-    int getAlbumCount();
+    @Delete
+    void deleteAlbum(Album album);
 
     @Query("SELECT * FROM albums ORDER BY album_name ASC")
     LiveData<List<Album>> getAllAlbums();
+
+    @Query("SELECT * FROM albums WHERE id = :id LIMIT 1")
+    Album getAlbumById(long id);
+
+    @Query("SELECT * FROM albums WHERE album_name = :name AND album_artist = :artist LIMIT 1")
+    Album getAlbumByNameAndArtist(String name, String artist);
+
+    @Query("SELECT * FROM albums WHERE has_hi_res = 1 ORDER BY album_name ASC")
+    LiveData<List<Album>> getHiResAlbums();
+
+    @Query("SELECT COUNT(*) FROM albums")
+    LiveData<Integer> getAlbumCount();
 }

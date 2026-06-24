@@ -9,6 +9,7 @@ import android.util.Log;
 
 import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
+import androidx.sqlite.db.SupportSQLiteDatabase;
 
 import com.zaknong.airus.database.AppDatabase;
 import com.zaknong.airus.database.entity.Album;
@@ -484,7 +485,7 @@ public class MediaScanner {
         // karena Room tidak punya GROUP BY yang mudah via DAO
 
         try {
-            android.database.sqlite.SQLiteDatabase db =
+            SupportSQLiteDatabase db =
                     database.getOpenHelper().getWritableDatabase();
 
             // Insert album baru atau update yang sudah ada
@@ -530,13 +531,12 @@ public class MediaScanner {
     private List<Song> getAllSongsSync() {
         // Query sinkronus — aman karena kita sudah di background thread
         try {
-            return database.getOpenHelper().getReadableDatabase()
+            android.database.Cursor cursor = database.getOpenHelper().getReadableDatabase()
                     .query("SELECT id, file_path, date_modified, play_count, " +
-                            "last_played, is_favorite, rating FROM songs", null)
-                    == null ? new ArrayList<>() : parseSongsFromRaw(
-                    database.getOpenHelper().getReadableDatabase()
-                    .query("SELECT * FROM songs", null));
+                            "last_played, is_favorite, rating FROM songs", null);
+            return parseSongsFromRaw(cursor);
         } catch (Exception e) {
+            Log.e(TAG, "getAllSongsSync error: " + e.getMessage(), e);
             return new ArrayList<>();
         }
     }

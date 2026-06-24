@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Mini player bar — tap untuk buka NowPlayingFragment full screen.
+    Desain: album art kecil | judul + artis | play/pause | next
+-->
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/now_playing_bar_root"
+    android:layout_width="match_parent"
+    android:layout_height="64dp"
+    android:background="@color/black_elevated"
+    android:elevation="8dp">
+
+    <!-- Progress bar tipis di bagian atas bar -->
+    <ProgressBar
+        android:id="@+id/mini_progress"
+        style="@style/Widget.AppCompat.ProgressBar.Horizontal"
+        android:layout_width="0dp"
+        android:layout_height="2dp"
+        android:max="1000"
+        android:progressTint="@color/accent_primary"
+        android:progressBackgroundTint="@color/black_border"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"/>
+
+    <!-- Album art kecil -->
+    <ImageView
+        android:id="@+id/mini_album_art"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginStart="8dp"
+        android:scaleType="centerCrop"
+        android:src="@drawable/ic_default_album_art"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"/>
+
+    <!-- Judul lagu -->
+    <TextView
+        android:id="@+id/mini_title"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="8dp"
+        android:ellipsize="marquee"
+        android:marqueeRepeatLimit="marquee_forever"
+        android:singleLine="true"
+        android:textColor="@color/text_primary"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        app:layout_constraintStart_toEndOf="@id/mini_album_art"
+        app:layout_constraintEnd_toStartOf="@id/mini_play_pause"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@id/mini_artist"/>
+
+    <!-- Artis + format label -->
+    <TextView
+        android:id="@+id/mini_artist"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="8dp"
+        android:ellipsize="end"
+        android:singleLine="true"
+        android:textColor="@color/text_secondary"
+        android:textSize="12sp"
+        app:layout_constraintStart_toEndOf="@id/mini_album_art"
+        app:layout_constraintEnd_toStartOf="@id/mini_play_pause"
+        app:layout_constraintTop_toBottomOf="@id/mini_title"
+        app:layout_constraintBottom_toBottomOf="parent"/>
+
+    <!-- Tombol play/pause -->
+    <ImageButton
+        android:id="@+id/mini_play_pause"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:src="@drawable/ic_play"
+        android:tint="@color/text_primary"
+        app:layout_constraintEnd_toStartOf="@id/mini_next"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"/>
+
+    <!-- Tombol next -->
+    <ImageButton
+        android:id="@+id/mini_next"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginEnd="4dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:src="@drawable/ic_next"
+        android:tint="@color/text_secondary"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"/>
+
+</androidx.constraintlayout.widget.ConstraintLayout>
