@@ -14,6 +14,8 @@ import com.zaknong.airus.database.dao.AlbumDao;
 import com.zaknong.airus.database.dao.EqPresetDao;
 import com.zaknong.airus.database.dao.PlaylistDao;
 import com.zaknong.airus.database.dao.SongDao;
+import com.zaknong.airus.database.dao.ScanFolderDao;
+import com.zaknong.airus.database.entity.ScanFolder;
 import com.zaknong.airus.database.entity.Album;
 import com.zaknong.airus.database.entity.EqPreset;
 import com.zaknong.airus.database.entity.Playlist;
@@ -38,9 +40,10 @@ import java.util.concurrent.Executors;
                 Album.class,
                 Playlist.class,
                 PlaylistSongCrossRef.class,
-                EqPreset.class
+                EqPreset.class,
+                ScanFolder.class
         },
-        version = 1,
+        version = 2,
         exportSchema = true   // ekspor schema ke /schemas/ untuk version control
 )
 public abstract class AppDatabase extends RoomDatabase {
@@ -55,6 +58,7 @@ public abstract class AppDatabase extends RoomDatabase {
     public abstract AlbumDao albumDao();
     public abstract PlaylistDao playlistDao();
     public abstract EqPresetDao eqPresetDao();
+    public abstract ScanFolderDao scanFolderDao();
 
     // =========================================================
     // Singleton

@@ -16,6 +16,28 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(oboe)
 
 # =============================================================
+# 1B. libFLAC (Fetch from GitHub)
+# =============================================================
+FetchContent_Declare(
+        flac
+        GIT_REPOSITORY https://github.com/xiph/flac.git
+        GIT_TAG        1.5.0
+)
+
+# Konfigurasi FLAC: Disable extra components
+set(BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING  OFF CACHE BOOL "" FORCE)
+set(BUILD_DOCS     OFF CACHE BOOL "" FORCE)
+set(WITH_OGG       OFF CACHE BOOL "" FORCE)
+set(BUILD_CXXLIBS  OFF CACHE BOOL "" FORCE)
+
+# Fix for Android stdio.h conflicts with libFLAC compat.h
+add_definitions(-DHAVE_FSEEKO -DHAVE_FTELLO)
+
+FetchContent_MakeAvailable(flac)
+
+# =============================================================
 # 2. Source files Native Engine
 # =============================================================
 add_library(
@@ -51,6 +73,7 @@ find_library(android-lib android)
 target_link_libraries(
         airus_engine
         oboe                # Oboe audio engine
+        FLAC                # libFLAC
         ${log-lib}          # Android logging
         ${android-lib}      # Android native APIs
         OpenSLES            # fallback audio (Android < 8)

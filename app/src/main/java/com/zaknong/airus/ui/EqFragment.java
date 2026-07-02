@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -42,28 +43,19 @@ public class EqFragment extends BottomSheetDialogFragment {
             1000f, 2000f, 4000f, 8000f, 16000f
     };
 
-    // Seekbar range: 0–240 = -12dB hingga +12dB
-    // Mid (120) = 0dB
     private static final int SEEKBAR_MAX  = 240;
     private static final int SEEKBAR_MID  = 120;
     private static final float DB_RANGE   = 12.0f;
 
-    // =========================================================
-    // Views
-    // =========================================================
     private SwitchMaterial switchBitPerfect;
     private LinearLayout   presetChips;
     private LinearLayout   eqBandsContainer;
     private SeekBar        seekbarPreamp;
     private TextView       tvPreampValue;
 
-    // Array seekbar per band (10 buah)
     private final SeekBar[] bandSeekbars = new SeekBar[10];
     private final TextView[] bandValues  = new TextView[10];
 
-    // =========================================================
-    // Service binding
-    // =========================================================
     private PlayerService playerService;
     private boolean       serviceBound = false;
 
@@ -79,16 +71,11 @@ public class EqFragment extends BottomSheetDialogFragment {
         }
     };
 
-    // State
     private EqPreset activePreset;
     private float[]  currentGains = new float[10];
     private float[]  currentFreqs = new float[10];
     private float[]  currentQs    = new float[10];
     private float    currentPreamp = 0f;
-
-    // =========================================================
-    // Lifecycle
-    // =========================================================
 
     @Nullable
     @Override
@@ -102,7 +89,6 @@ public class EqFragment extends BottomSheetDialogFragment {
     public void onViewCreated(@NonNull View view,
                               @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
-
         bindViews(view);
         buildBandSliders();
         setupBitPerfectSwitch();
@@ -136,10 +122,6 @@ public class EqFragment extends BottomSheetDialogFragment {
         }
     }
 
-    // =========================================================
-    // Bind views
-    // =========================================================
-
     private void bindViews(View root) {
         switchBitPerfect  = root.findViewById(R.id.switch_bitperfect);
         presetChips       = root.findViewById(R.id.preset_chips);
@@ -148,19 +130,10 @@ public class EqFragment extends BottomSheetDialogFragment {
         tvPreampValue     = root.findViewById(R.id.tv_preamp_value);
     }
 
-    // =========================================================
-    // Build 10 band sliders secara programatik
-    // Kenapa programatik dan bukan XML?
-    // Karena 10 band identik — lebih bersih dari copy-paste XML 10x
-    // =========================================================
-
     private void buildBandSliders() {
         eqBandsContainer.removeAllViews();
-
         for (int i = 0; i < 10; i++) {
             final int bandIndex = i;
-
-            // Satu kolom per band
             LinearLayout column = new LinearLayout(requireContext());
             column.setOrientation(LinearLayout.VERTICAL);
             column.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
@@ -168,56 +141,48 @@ public class EqFragment extends BottomSheetDialogFragment {
                     0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
             column.setLayoutParams(colParams);
 
-            // Label frekuensi di atas
             TextView freqLabel = new TextView(requireContext());
             freqLabel.setText(formatFreq(FREQ_LABELS[i]));
-            freqLabel.setTextColor(getResources().getColor(
-                    R.color.text_tertiary, null));
+            freqLabel.setTextColor(getResources().getColor(R.color.text_tertiary, null));
             freqLabel.setTextSize(9f);
             freqLabel.setGravity(android.view.Gravity.CENTER);
             column.addView(freqLabel);
 
-            // Nilai dB di tengah atas slider
             TextView dbValue = new TextView(requireContext());
             dbValue.setText("0.0");
-            dbValue.setTextColor(getResources().getColor(
-                    R.color.accent_primary, null));
+            dbValue.setTextColor(getResources().getColor(R.color.accent_primary, null));
             dbValue.setTextSize(9f);
             dbValue.setGravity(android.view.Gravity.CENTER);
             bandValues[i] = dbValue;
             column.addView(dbValue);
 
-            // SeekBar vertikal
             SeekBar seekBar = new SeekBar(requireContext());
             seekBar.setMax(SEEKBAR_MAX);
-            seekBar.setProgress(SEEKBAR_MID); // 0dB
-            seekBar.setRotation(270f);        // putar jadi vertikal
-            LinearLayout.LayoutParams sbParams = new LinearLayout.LayoutParams(
-                    180, 180); // lebar slider saat diputar = tinggi aslinya
+            seekBar.setProgress(SEEKBAR_MID);
+            seekBar.setRotation(270f);
+            LinearLayout.LayoutParams sbParams = new LinearLayout.LayoutParams(800, 240);
             sbParams.gravity = android.view.Gravity.CENTER;
+            sbParams.setMargins(-280, 80, -280, 80);
             seekBar.setLayoutParams(sbParams);
-            seekBar.setProgressTintList(
-                    android.content.res.ColorStateList.valueOf(
+            seekBar.setPadding(60, 0, 60, 0);
+
+            seekBar.setOnTouchListener((v, event) -> {
+                v.getParent().requestDisallowInterceptTouchEvent(true);
+                return false;
+            });
+
+            seekBar.setProgressTintList(android.content.res.ColorStateList.valueOf(
                             getResources().getColor(R.color.accent_primary, null)));
-            seekBar.setThumb(getResources().getDrawable(
-                    R.drawable.seekbar_thumb, null));
+            seekBar.setThumb(getResources().getDrawable(R.drawable.seekbar_thumb, null));
 
             seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
                 @Override
                 public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
                     float gainDb = progressToDb(progress);
-                    bandValues[bandIndex].setText(
-                            String.format("%.1f", gainDb));
+                    bandValues[bandIndex].setText(String.format("%.1f", gainDb));
                     currentGains[bandIndex] = gainDb;
-
                     if (fromUser && serviceBound) {
-                        // Kirim ke engine secara realtime
-                        playerService.getAudioEngine().setEqBand(
-                                bandIndex,
-                                currentFreqs[bandIndex],
-                                gainDb,
-                                currentQs[bandIndex]
-                        );
+                        playerService.getAudioEngine().setEqBand(bandIndex, currentFreqs[bandIndex], gainDb, currentQs[bandIndex]);
                     }
                 }
                 @Override public void onStartTrackingTouch(SeekBar sb) {}
@@ -227,29 +192,17 @@ public class EqFragment extends BottomSheetDialogFragment {
             bandSeekbars[i] = seekBar;
             column.addView(seekBar);
             eqBandsContainer.addView(column);
-
-            // Init nilai dari FREQ_LABELS
             currentFreqs[i] = FREQ_LABELS[i];
             currentQs[i]    = 1.41f;
             currentGains[i] = 0f;
         }
     }
 
-    // =========================================================
-    // Bit-Perfect Switch
-    // =========================================================
-
     private void setupBitPerfectSwitch() {
-        // Sync state awal dari PlayerState
-        Boolean isBP = PlayerState.getInstance()
-                .isBitPerfectActive().getValue();
+        Boolean isBP = PlayerState.getInstance().isBitPerfectActive().getValue();
         switchBitPerfect.setChecked(Boolean.TRUE.equals(isBP));
-
-        // Saat bit-perfect ON → disable semua slider EQ (greyed out)
         updateEqEnabled(!Boolean.TRUE.equals(isBP));
-
         switchBitPerfect.setOnCheckedChangeListener((btn, isChecked) -> {
-            // Toggle via PlayerService agar konsisten dengan state global
             if (serviceBound) playerService.toggleBitPerfect();
             updateEqEnabled(!isChecked);
         });
@@ -259,42 +212,42 @@ public class EqFragment extends BottomSheetDialogFragment {
         float alpha = enabled ? 1.0f : 0.4f;
         eqBandsContainer.setAlpha(alpha);
         seekbarPreamp.setEnabled(enabled);
-        for (SeekBar sb : bandSeekbars) {
-            if (sb != null) sb.setEnabled(enabled);
-        }
+        for (SeekBar sb : bandSeekbars) { if (sb != null) sb.setEnabled(enabled); }
     }
 
-    // =========================================================
-    // Preamp Seekbar
-    // Range: 0–240 → -12dB hingga +12dB (mid=120 → 0dB)
-    // =========================================================
-
     private void setupPreampSeekbar() {
-        seekbarPreamp.setOnSeekBarChangeListener(
-                new SeekBar.OnSeekBarChangeListener() {
+        seekbarPreamp.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
                     @Override
-                    public void onProgressChanged(SeekBar sb, int progress,
-                                                  boolean fromUser) {
+                    public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
                         float db = progressToDb(progress);
                         tvPreampValue.setText(String.format("%.1f dB", db));
                         currentPreamp = db;
                     }
                     @Override public void onStartTrackingTouch(SeekBar sb) {}
-                    @Override
-                    public void onStopTrackingTouch(SeekBar sb) {
-                        // Apply preamp ke engine saat selesai drag
-                        applyCurrentEqToEngine();
-                    }
+                    @Override public void onStopTrackingTouch(SeekBar sb) { applyCurrentEqToEngine(); }
                 });
     }
 
-    // =========================================================
-    // Action buttons
-    // =========================================================
-
     private void setupActionButtons(View root) {
-        root.findViewById(R.id.btn_reset).setOnClickListener(v -> resetAllBands());
-        root.findViewById(R.id.btn_save_preset).setOnClickListener(v -> showSavePresetDialog());
+        root.findViewById(R.id.btn_reset).setOnClickListener(v -> resetToCurrentPreset());
+        root.findViewById(R.id.btn_save_preset).setOnClickListener(v -> saveOrUpdatePreset());
+        root.findViewById(R.id.btn_add_preset).setOnClickListener(v -> showSavePresetDialog());
+    }
+
+    private void resetToCurrentPreset() {
+        if (activePreset != null) {
+            applyPreset(activePreset);
+        } else {
+            resetAllBands();
+        }
+    }
+
+    private void saveOrUpdatePreset() {
+        if (activePreset != null && !"SYSTEM".equals(activePreset.presetType)) {
+            updatePreset(activePreset);
+        } else {
+            showSavePresetDialog();
+        }
     }
 
     private void resetAllBands() {
@@ -307,16 +260,12 @@ public class EqFragment extends BottomSheetDialogFragment {
         applyCurrentEqToEngine();
     }
 
-    // =========================================================
-    // Load presets dari database → tampilkan sebagai Chips
-    // =========================================================
-
     private void loadPresets() {
         AppDatabase.getInstance(requireContext())
                 .eqPresetDao()
                 .getAllPresets()
                 .observe(getViewLifecycleOwner(), presets -> {
-                    if (presets == null) return;
+                    if (presets == null || presetChips == null) return;
                     presetChips.removeAllViews();
                     for (EqPreset preset : presets) {
                         addPresetChip(preset);
@@ -329,20 +278,30 @@ public class EqFragment extends BottomSheetDialogFragment {
         chip.setText(preset.name);
         chip.setCheckable(true);
         chip.setChecked(preset.isActive);
-        chip.setChipBackgroundColorResource(
-                preset.isActive ? R.color.accent_primary : R.color.black_elevated);
-        chip.setTextColor(getResources().getColor(
-                preset.isActive ? R.color.black_true : R.color.text_secondary, null));
-
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        );
+        if (preset.isActive) activePreset = preset;
+        chip.setChipBackgroundColorResource(preset.isActive ? R.color.accent_primary : R.color.black_elevated);
+        chip.setTextColor(getResources().getColor(preset.isActive ? R.color.black_true : R.color.text_secondary, null));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         params.setMarginEnd(8);
         chip.setLayoutParams(params);
-
         chip.setOnClickListener(v -> applyPreset(preset));
+        chip.setOnLongClickListener(v -> {
+            if ("SYSTEM".equals(preset.presetType)) return false;
+            showDeletePresetDialog(preset);
+            return true;
+        });
         presetChips.addView(chip);
+    }
+
+    private void showDeletePresetDialog(EqPreset preset) {
+        new MaterialAlertDialogBuilder(requireContext())
+                .setTitle("Hapus Preset")
+                .setMessage("Hapus preset '" + preset.name + "'?")
+                .setPositiveButton("Hapus", (dialog, which) -> {
+                    AppDatabase.databaseWriteExecutor.execute(() -> AppDatabase.getInstance(requireContext()).eqPresetDao().deletePreset(preset));
+                })
+                .setNegativeButton("Batal", null)
+                .show();
     }
 
     private void applyPreset(EqPreset preset) {
@@ -353,60 +312,41 @@ public class EqFragment extends BottomSheetDialogFragment {
                 float gain = (float) band.getDouble("gain");
                 float freq = (float) band.getDouble("freq");
                 float q    = (float) band.getDouble("q");
-
                 currentGains[i] = gain;
                 currentFreqs[i] = freq;
                 currentQs[i]    = q;
-
-                // Update seekbar UI
                 bandSeekbars[i].setProgress(dbToProgress(gain));
             }
-
             currentPreamp = preset.preampDb;
             seekbarPreamp.setProgress(dbToProgress(preset.preampDb));
             tvPreampValue.setText(String.format("%.1f dB", preset.preampDb));
-
             applyCurrentEqToEngine();
-
-            // Simpan preset aktif ke database
             AppDatabase.databaseWriteExecutor.execute(() -> {
                 AppDatabase db = AppDatabase.getInstance(requireContext());
                 db.eqPresetDao().deactivateAllPresets();
                 db.eqPresetDao().activatePreset(preset.id);
             });
-
         } catch (Exception e) {
-            android.util.Log.e(TAG, "applyPreset error: " + e.getMessage());
+            Log.e(TAG, "applyPreset error: " + e.getMessage());
         }
     }
 
-    // =========================================================
-    // Apply EQ ke engine
-    // =========================================================
-
     private void applyCurrentEqToEngine() {
         if (!serviceBound || playerService.getAudioEngine() == null) return;
-        playerService.getAudioEngine().setEqPreset(
-                currentFreqs, currentGains, currentQs, currentPreamp);
+        playerService.getAudioEngine().setEqPreset(currentFreqs, currentGains, currentQs, currentPreamp);
     }
 
-    // =========================================================
-    // Save Preset Dialog
-    // =========================================================
-
     private void showSavePresetDialog() {
-        View dialogView = LayoutInflater.from(requireContext())
-                .inflate(R.layout.dialog_save_preset, null);
-
+        View dialogView = LayoutInflater.from(requireContext()).inflate(R.layout.dialog_save_preset, null);
         new MaterialAlertDialogBuilder(requireContext())
-                .setTitle("Simpan Preset")
+                .setTitle("Simpan Preset Baru")
                 .setView(dialogView)
                 .setPositiveButton("Simpan", (dialog, which) -> {
                     TextInputEditText input = dialogView.findViewById(R.id.et_preset_name);
-                    if (input == null) return;
-                    String name = input.getText() != null
-                            ? input.getText().toString().trim() : "";
-                    if (!name.isEmpty()) savePreset(name);
+                    if (input != null && input.getText() != null) {
+                        String name = input.getText().toString().trim();
+                        if (!name.isEmpty()) savePreset(name);
+                    }
                 })
                 .setNegativeButton("Batal", null)
                 .show();
@@ -420,65 +360,68 @@ public class EqFragment extends BottomSheetDialogFragment {
                 band.put("freq", currentFreqs[i]);
                 band.put("gain", currentGains[i]);
                 band.put("q",    currentQs[i]);
-                band.put("type", i == 0 ? "LOW_SHELF"
-                        : i == 9 ? "HIGH_SHELF" : "PEAK");
+                band.put("type", i == 0 ? "LOW_SHELF" : i == 9 ? "HIGH_SHELF" : "PEAK");
                 bandsJson.put(band);
             }
-
             EqPreset preset   = new EqPreset();
             preset.name       = name;
             preset.presetType = "USER";
             preset.bandsJson  = bandsJson.toString();
             preset.preampDb   = currentPreamp;
-            preset.isActive   = false;
+            preset.isActive   = true;
             preset.dateCreated  = System.currentTimeMillis();
             preset.dateModified = preset.dateCreated;
 
-            AppDatabase.databaseWriteExecutor.execute(() ->
-                    AppDatabase.getInstance(requireContext())
-                            .eqPresetDao()
-                            .insertPreset(preset)
-            );
-
+            AppDatabase.databaseWriteExecutor.execute(() -> {
+                AppDatabase db = AppDatabase.getInstance(requireContext());
+                db.eqPresetDao().deactivateAllPresets();
+                db.eqPresetDao().insertPreset(preset);
+            });
         } catch (Exception e) {
-            android.util.Log.e(TAG, "savePreset error: " + e.getMessage());
+            Log.e(TAG, "savePreset error: " + e.getMessage());
         }
     }
 
-    // =========================================================
-    // Observe PlayerState
-    // =========================================================
-
-    private void observePlayerState() {
-        PlayerState.getInstance()
-                .isBitPerfectActive()
-                .observe(getViewLifecycleOwner(), isBP -> {
-                    switchBitPerfect.setChecked(Boolean.TRUE.equals(isBP));
-                    updateEqEnabled(!Boolean.TRUE.equals(isBP));
-                });
+    private void updatePreset(EqPreset preset) {
+        try {
+            JSONArray bandsJson = new JSONArray();
+            for (int i = 0; i < 10; i++) {
+                JSONObject band = new JSONObject();
+                band.put("freq", currentFreqs[i]);
+                band.put("gain", currentGains[i]);
+                band.put("q",    currentQs[i]);
+                band.put("type", i == 0 ? "LOW_SHELF" : i == 9 ? "HIGH_SHELF" : "PEAK");
+                bandsJson.put(band);
+            }
+            preset.bandsJson = bandsJson.toString();
+            preset.preampDb = currentPreamp;
+            preset.dateModified = System.currentTimeMillis();
+            AppDatabase.databaseWriteExecutor.execute(() -> AppDatabase.getInstance(requireContext()).eqPresetDao().updatePreset(preset));
+        } catch (Exception e) {
+            Log.e(TAG, "updatePreset error: " + e.getMessage());
+        }
     }
 
-    // =========================================================
-    // Helpers
-    // =========================================================
+    private void observePlayerState() {
+        PlayerState.getInstance().isBitPerfectActive().observe(getViewLifecycleOwner(), isBP -> {
+            if (switchBitPerfect != null) {
+                switchBitPerfect.setChecked(Boolean.TRUE.equals(isBP));
+                updateEqEnabled(!Boolean.TRUE.equals(isBP));
+            }
+        });
+    }
 
-    /** SeekBar progress (0–240) → gain dB (-12.0 hingga +12.0) */
     private float progressToDb(int progress) {
         return (progress - SEEKBAR_MID) * DB_RANGE / SEEKBAR_MID;
     }
 
-    /** Gain dB → SeekBar progress */
     private int dbToProgress(float db) {
         int p = Math.round(db * SEEKBAR_MID / DB_RANGE) + SEEKBAR_MID;
         return Math.max(0, Math.min(SEEKBAR_MAX, p));
     }
 
-    /** Format frekuensi: 1000 → "1k", 31 → "31" */
     private String formatFreq(float freq) {
-        if (freq >= 1000f) {
-            int k = (int) (freq / 1000f);
-            return k + "k";
-        }
+        if (freq >= 1000f) return ((int) (freq / 1000f)) + "k";
         return String.valueOf((int) freq);
     }
 }

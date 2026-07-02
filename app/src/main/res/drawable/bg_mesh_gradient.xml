@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Base deep black -->
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/black_true" />
+        </shape>
+    </item>
+
+    <!-- Top Left Blob (Amber) -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:type="radial"
+                android:centerX="0.2"
+                android:centerY="0.2"
+                android:gradientRadius="400dp"
+                android:startColor="@color/mesh_primary"
+                android:endColor="@android:color/transparent" />
+        </shape>
+    </item>
+
+    <!-- Top Right Blob (Blue) -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:type="radial"
+                android:centerX="0.8"
+                android:centerY="0.3"
+                android:gradientRadius="500dp"
+                android:startColor="@color/mesh_secondary"
+                android:endColor="@android:color/transparent" />
+        </shape>
+    </item>
+
+    <!-- Middle Left Blob (Purple) -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:type="radial"
+                android:centerX="0.3"
+                android:centerY="0.7"
+                android:gradientRadius="400dp"
+                android:startColor="@color/mesh_tertiary"
+                android:endColor="@android:color/transparent" />
+        </shape>
+    </item>
+
+    <!-- Bottom Scrim for smooth fade into list -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:type="linear"
+                android:angle="90"
+                android:startColor="@color/black_true"
+                android:centerColor="@android:color/transparent"
+                android:centerY="0.6"
+                android:endColor="@android:color/transparent" />
+        </shape>
+    </item>
+</layer-list>

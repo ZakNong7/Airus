@@ -178,23 +178,23 @@ public class Song {
      * Float.NaN = tag tidak ada.
      */
     @ColumnInfo(name = "rg_track_gain")
-    public float rgTrackGain = Float.NaN;
+    public float rgTrackGain;
 
     /**
      * ReplayGain: peak level track (0.0 - 1.0).
      * Digunakan untuk mencegah clipping saat gain diterapkan.
      */
     @ColumnInfo(name = "rg_track_peak")
-    public float rgTrackPeak = Float.NaN;
+    public float rgTrackPeak;
 
     /**
      * ReplayGain: gain adjustment per album (untuk album mode).
      */
     @ColumnInfo(name = "rg_album_gain")
-    public float rgAlbumGain = Float.NaN;
+    public float rgAlbumGain;
 
     @ColumnInfo(name = "rg_album_peak")
-    public float rgAlbumPeak = Float.NaN;
+    public float rgAlbumPeak;
 
     // =========================================================
     // Library Management

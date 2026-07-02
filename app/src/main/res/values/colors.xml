@@ -21,4 +21,12 @@
     <color name="color_hires">#FF2196F3</color>      <!-- blue - hi-res badge -->
     <color name="color_dsd">#FFFF9800</color>        <!-- orange - DSD badge -->
     <color name="color_bitperfect">#FF9C27B0</color> <!-- purple - bit-perfect active -->
+
+    <!-- ===== Mesh Gradient Colors (ArchiveTune Style) ===== -->
+    <color name="mesh_primary">#4DFFEFB0</color>   <!-- Amber Translucent -->
+    <color name="mesh_secondary">#4D2196F3</color> <!-- Blue Translucent -->
+    <color name="mesh_tertiary">#4D9C27B0</color>  <!-- Purple Translucent -->
+    <color name="mesh_accent">#4DEFB000</color>    <!-- Gold Translucent -->
+
+    <color name="surface_variant">#1AFFFFFF</color> <!-- 10% white overlay -->
 </resources>

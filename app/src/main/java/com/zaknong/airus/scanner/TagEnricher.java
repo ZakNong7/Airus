@@ -23,6 +23,7 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.math.BigInteger;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -121,7 +122,7 @@ public class TagEnricher {
     public void enrichSong(long songId) {
         executor.execute(() -> {
             Song song = database.songDao().getSongById(songId);
-            if (song != null) enrichSingle(song);
+            if (song != null) enrichSingle(song, true);
         });
     }
 
@@ -145,6 +146,8 @@ public class TagEnricher {
         Log.d(TAG_LOG, "Enriching " + total + " lagu...");
         int enriched = 0;
 
+        List<Song> toUpdate = new ArrayList<>();
+
         for (Song song : songs) {
             // Skip DSD — ditangani native C++ di Tahap 4
             if (song.isDsd) {
@@ -152,8 +155,15 @@ public class TagEnricher {
                 continue;
             }
 
-            enrichSingle(song);
+            enrichSingle(song, false); // pass false to avoid inner update
+            toUpdate.add(song);
             enriched++;
+
+            // Batch update setiap 50 lagu
+            if (toUpdate.size() >= 50) {
+                database.songDao().updateAll(toUpdate);
+                toUpdate.clear();
+            }
 
             // Update progress setiap 10 lagu
             if (enriched % 10 == 0 || enriched == total) {
@@ -161,14 +171,25 @@ public class TagEnricher {
                         enriched, total, false, song.fileName));
             }
         }
+        
+        // Final flush
+        if (!toUpdate.isEmpty()) database.songDao().updateAll(toUpdate);
 
         enrichProgress.postValue(
                 new EnrichProgress(enriched, total, true, null));
         Log.d(TAG_LOG, "Enrich selesai: " + enriched + " lagu");
     }
 
-    private void enrichSingle(Song song) {
+    private void enrichSingle(Song song, boolean shouldUpdateDb) {
         try {
+            if (song.filePath != null && song.filePath.startsWith("content://")) {
+                enrichSingleWithRetriever(song);
+                if (shouldUpdateDb) {
+                    database.songDao().updateSong(song);
+                }
+                return;
+            }
+
             File file = new File(song.filePath);
             if (!file.exists()) return;
 
@@ -207,6 +228,10 @@ public class TagEnricher {
                 song.composer = getTagField(tag, FieldKey.COMPOSER, song.composer);
                 song.comment = getTagField(tag, FieldKey.COMMENT, song.comment);
 
+                if (song.artist == null || song.artist.isEmpty()) song.artist = "Unknown Artist";
+                if (song.album == null || song.album.isEmpty()) song.album = "Unknown Album";
+                if (song.albumArtist == null || song.albumArtist.isEmpty()) song.albumArtist = song.artist;
+
                 String yearStr = getTagField(tag, FieldKey.YEAR, null);
                 if (yearStr != null && !yearStr.isEmpty()) {
                     try {
@@ -242,11 +267,125 @@ public class TagEnricher {
             }
 
             // Simpan ke database
-            database.songDao().updateSong(song);
+            if (shouldUpdateDb) {
+                database.songDao().updateSong(song);
+            }
 
         } catch (Exception e) {
             // jAudioTagger gagal baca file — tidak fatal, lanjut ke lagu berikutnya
             Log.w(TAG_LOG, "Gagal enrich: " + song.fileName + " — " + e.getMessage());
+        }
+    }
+
+    private void enrichSingleWithRetriever(Song song) {
+        android.media.MediaMetadataRetriever retriever = new android.media.MediaMetadataRetriever();
+        try {
+            retriever.setDataSource(context, android.net.Uri.parse(song.filePath));
+
+            // Duration
+            String durationStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION);
+            if (durationStr != null) {
+                song.durationMs = Long.parseLong(durationStr);
+            }
+
+            // Title
+            String title = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_TITLE);
+            if (title != null && !title.isEmpty()) song.title = title;
+
+            // Artist
+            String artist = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ARTIST);
+            if (artist != null && !artist.isEmpty()) song.artist = artist;
+
+            // Album
+            String album = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ALBUM);
+            if (album != null && !album.isEmpty()) song.album = album;
+
+            // Album Artist
+            String albumArtist = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST);
+            if (albumArtist != null && !albumArtist.isEmpty()) song.albumArtist = albumArtist;
+
+            // Genre
+            String genre = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_GENRE);
+            if (genre != null && !genre.isEmpty()) song.genre = genre;
+
+            // Year
+            String yearStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_YEAR);
+            if (yearStr != null && yearStr.length() >= 4) {
+                try {
+                    song.year = Integer.parseInt(yearStr.substring(0, 4));
+                } catch (NumberFormatException ignored) {}
+            }
+
+            // CD Track Number
+            String trackStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER);
+            if (trackStr != null) {
+                try {
+                    song.trackNumber = Integer.parseInt(trackStr);
+                } catch (NumberFormatException ignored) {}
+            }
+
+            // Bitrate
+            String bitrateStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_BITRATE);
+            if (bitrateStr != null) {
+                try {
+                    song.bitrate = Integer.parseInt(bitrateStr) / 1000;
+                } catch (NumberFormatException ignored) {}
+            }
+
+            // Defaults if missing
+            if (song.artist == null || song.artist.isEmpty()) song.artist = "Unknown Artist";
+            if (song.album == null || song.album.isEmpty()) song.album = "Unknown Album";
+            if (song.albumArtist == null || song.albumArtist.isEmpty()) song.albumArtist = song.artist;
+
+            // Sample rate and bits per sample for Hi-Res check (only available in API 31+)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                try {
+                    String sampleRateStr = retriever.extractMetadata(38 /* METADATA_KEY_SAMPLERATE */);
+                    if (sampleRateStr != null) song.sampleRate = Integer.parseInt(sampleRateStr);
+                    String bitsPerSampleStr = retriever.extractMetadata(39 /* METADATA_KEY_BITS_PER_SAMPLE */);
+                    if (bitsPerSampleStr != null) song.bitDepth = Integer.parseInt(bitsPerSampleStr);
+                } catch (Exception ignored) {}
+            }
+
+            // Fallback for WAV / FLAC default sample rates if not read (to determine hi-res status safely)
+            if (song.sampleRate == 0) {
+                if (song.format != null) {
+                    if (song.format.equalsIgnoreCase("FLAC") || song.format.equalsIgnoreCase("WAV")) {
+                        song.sampleRate = 44100;
+                        song.bitDepth = 16;
+                    }
+                }
+            }
+            song.isHiRes = (song.sampleRate >= 88200) || (song.bitDepth >= 24);
+
+            // ---- Album Art ----
+            byte[] picture = retriever.getEmbeddedPicture();
+            if (picture != null && picture.length > 0) {
+                String hash = md5(picture);
+                if (!hash.equals(song.albumArtHash)) {
+                    File cacheFile = new File(artCacheDir, hash + ".jpg");
+                    if (!cacheFile.exists()) {
+                        Bitmap bitmap = BitmapFactory.decodeByteArray(picture, 0, picture.length);
+                        if (bitmap != null) {
+                            bitmap = resizeIfNeeded(bitmap, 800);
+                            try (FileOutputStream fos = new FileOutputStream(cacheFile)) {
+                                bitmap.compress(Bitmap.CompressFormat.JPEG, 85, fos);
+                            }
+                        }
+                    }
+                    if (cacheFile.exists()) {
+                        song.albumArtPath = cacheFile.getAbsolutePath();
+                        song.albumArtHash = hash;
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            Log.e(TAG_LOG, "Gagal enrich dengan MediaMetadataRetriever: " + song.filePath, e);
+        } finally {
+            try {
+                retriever.release();
+            } catch (Exception ignored) {}
         }
     }
 
@@ -267,14 +406,24 @@ public class TagEnricher {
      */
     private void extractAndCacheAlbumArt(Song song, Tag tag) {
         try {
-            Artwork artwork = tag.getFirstArtwork();
-            if (artwork == null) return;
+            byte[] imageData = null;
 
-            byte[] imageData = artwork.getBinaryData();
+            if (tag != null) {
+                // Try to get all artwork
+                List<Artwork> artworks = tag.getArtworkList();
+                if (artworks != null && !artworks.isEmpty()) {
+                    imageData = artworks.get(0).getBinaryData();
+                }
+            }
+
+            // Jika tidak ada art di tag, cari di folder (cover.jpg, folder.jpg)
+            if (imageData == null || imageData.length == 0) {
+                imageData = findArtInFolder(song.folderPath);
+            }
+
             if (imageData == null || imageData.length == 0) return;
 
             // Hash MD5 dari image data sebagai nama file cache
-            // Jika dua lagu punya art yang sama, mereka share satu file cache
             String hash = md5(imageData);
 
             // Jika hash sama dengan yang sudah ada, skip extract
@@ -283,19 +432,15 @@ public class TagEnricher {
             File cacheFile = new File(artCacheDir, hash + ".jpg");
 
             if (!cacheFile.exists()) {
-                // Decode → compress ke JPEG → simpan
                 Bitmap bitmap = BitmapFactory.decodeByteArray(
                         imageData, 0, imageData.length);
 
                 if (bitmap == null) return;
-
-                // Resize jika terlalu besar (>800px) untuk hemat storage
                 bitmap = resizeIfNeeded(bitmap, 800);
 
                 try (FileOutputStream out = new FileOutputStream(cacheFile)) {
                     bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out);
                 }
-
                 bitmap.recycle();
             }
 
@@ -305,6 +450,23 @@ public class TagEnricher {
         } catch (Exception e) {
             Log.w(TAG_LOG, "Gagal extract art: " + song.fileName + " — " + e.getMessage());
         }
+    }
+
+    private byte[] findArtInFolder(String folderPath) {
+        if (folderPath == null) return null;
+        File folder = new File(folderPath);
+        if (!folder.exists() || !folder.isDirectory()) return null;
+
+        String[] artNames = {"cover.jpg", "cover.png", "folder.jpg", "folder.png", "album.jpg", "front.jpg"};
+        for (String name : artNames) {
+            File artFile = new File(folder, name);
+            if (artFile.exists()) {
+                try {
+                    return java.nio.file.Files.readAllBytes(artFile.toPath());
+                } catch (Exception ignored) {}
+            }
+        }
+        return null;
     }
 
     private Bitmap resizeIfNeeded(Bitmap original, int maxSize) {
@@ -371,7 +533,7 @@ public class TagEnricher {
      * Atau "+1.23 dB" → 1.23f
      */
     private float parseReplayGainDb(String value) {
-        if (value == null || value.isEmpty()) return Float.NaN;
+        if (value == null || value.isEmpty()) return 0.0f;
         try {
             // Hapus " dB" di akhir, trim whitespace
             String clean = value.toLowerCase()
@@ -379,7 +541,7 @@ public class TagEnricher {
                     .trim();
             return Float.parseFloat(clean);
         } catch (NumberFormatException e) {
-            return Float.NaN;
+            return 0.0f;
         }
     }
 
@@ -387,11 +549,11 @@ public class TagEnricher {
      * Parse ReplayGain peak value: "0.954325" → 0.954325f
      */
     private float parseReplayGainFloat(String value) {
-        if (value == null || value.isEmpty()) return Float.NaN;
+        if (value == null || value.isEmpty()) return 0.0f;
         try {
             return Float.parseFloat(value.trim());
         } catch (NumberFormatException e) {
-            return Float.NaN;
+            return 0.0f;
         }
     }
 

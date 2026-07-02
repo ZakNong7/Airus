@@ -52,11 +52,7 @@ namespace airus {
          * Buka file WAV dan baca header.
          * @return true jika berhasil dan format valid
          */
-        bool open(const std::string& filePath);
-
-        /**
-         * Tutup file.
-         */
+        bool open(const std::string& filePath, int fd);
         void close();
 
         /**
@@ -90,6 +86,7 @@ namespace airus {
 
         // Posisi frame saat ini
         long currentFrame = 0;
+        std::vector<uint8_t> readBuffer;
 
         bool parseHeader();
         bool findChunk(const char* chunkId, uint32_t& chunkSize);

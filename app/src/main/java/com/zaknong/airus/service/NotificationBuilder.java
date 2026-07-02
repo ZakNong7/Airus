@@ -120,11 +120,6 @@ public class NotificationBuilder {
         // Tombol repeat dengan icon sesuai mode
         int repeatIcon = getRepeatIcon(repeatMode);
 
-        // Tombol bit-perfect toggle — ini yang membedakan Airus
-        int bpIcon = isBitPerfect
-                ? R.drawable.ic_bitperfect_active
-                : R.drawable.ic_bitperfect_inactive;
-
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_ID)
 
                 // ---- Konten ----
@@ -152,8 +147,8 @@ public class NotificationBuilder {
                 .addAction(playPauseAction)
                 .addAction(buildAction(R.drawable.ic_next, "Next",
                         PlayerService.ACTION_NEXT))
-                .addAction(buildAction(bpIcon, "Bit-Perfect",
-                        PlayerService.ACTION_TOGGLE_BIT_PERFECT))
+                .addAction(buildAction(R.drawable.ic_shuffle, "Shuffle",
+                        PlayerService.ACTION_TOGGLE_SHUFFLE))
                 .addAction(buildAction(repeatIcon, "Repeat",
                         PlayerService.ACTION_CYCLE_REPEAT))
 

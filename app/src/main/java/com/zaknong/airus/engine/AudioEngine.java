@@ -57,10 +57,12 @@ public class AudioEngine {
      * Bit-perfect: bypass Android mixer sepenuhnya.
      *
      * @param filePath  path absolut file audio
-     * @param format    "FLAC", "WAV", "DSD64", "DSD128", dll
+     * @param fmt        "FLAC", "WAV", "DSD64", "DSD128", dll
+     * @param sampleRate Sample rate lagu (misal 44100, 48000, 192000)
+     * @param bitDepth   Bit depth lagu (misal 16, 24, 32)
      * @return true jika berhasil mulai
      */
-    public native boolean playNative(String filePath, String format);
+    public native boolean playNative(String filePath, int fd, String format, int sampleRate, int bitDepth);
 
     // =========================================================
     // Playback — MediaCodec Path (MP3, AAC, ALAC, OGG)
@@ -70,10 +72,12 @@ public class AudioEngine {
      * Mulai decode via MediaCodec dan routing ke Oboe output stream.
      * Untuk format lossy dan ALAC yang lebih efisien via hardware decoder.
      *
-     * @param filePath  path absolut file audio
+     * @param filePath   path absolut file audio
+     * @param sampleRate Sample rate lagu
+     * @param bitDepth   Bit depth lagu
      * @return true jika berhasil mulai
      */
-    public native boolean playMediaCodec(String filePath);
+    public native boolean playMediaCodec(String filePath, int sampleRate, int bitDepth);
 
     // =========================================================
     // Transport Controls
@@ -87,7 +91,7 @@ public class AudioEngine {
      * Seek ke posisi tertentu.
      * @param positionMs posisi dalam milidetik
      */
-    public native void seekTo(long positionMs);
+    public native void seekTo(long positionMs, int fd);
 
     /**
      * Posisi playback saat ini dalam milidetik.
@@ -199,6 +203,18 @@ public class AudioEngine {
      * @param volume 0.0f (mute) hingga 1.0f (max)
      */
     public native void setHardwareVolume(float volume);
+
+    /**
+     * Isi audio buffer native dengan data PCM float.
+     * Digunakan oleh MediaCodecDecoder (Java).
+     */
+    public native void fillBuffer(float[] samples);
+
+    /**
+     * Set flag End of Stream (EOS) untuk playback via fillBuffer.
+     * Jika true, native engine akan trigger onTrackCompleted saat buffer kosong.
+     */
+    public native void setEndOfStream(boolean eos);
 
     // =========================================================
     // Crossfeed

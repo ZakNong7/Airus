@@ -21,4 +21,8 @@
         <!-- Fullscreen immersive -->
         <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="28">shortEdges</item>
     </style>
+
+    <style name="ShapeAppearance.Airus.RoundedArt" parent="">
+        <item name="cornerSize">12dp</item>
+    </style>
 </resources>

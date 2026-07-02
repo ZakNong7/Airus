@@ -10,10 +10,10 @@ import android.os.Build;
 import android.provider.Settings;
 import android.util.Log;
 
+import androidx.activity.ComponentActivity;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AlertDialog;
-import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 /**
@@ -46,11 +46,11 @@ public class PermissionManager {
         void onPermissionResult(boolean granted);
     }
 
-    private final AppCompatActivity activity;
+    private final ComponentActivity activity;
     private final PermissionCallback callback;
     private ActivityResultLauncher<String[]> permissionLauncher;
 
-    public PermissionManager(AppCompatActivity activity, PermissionCallback callback) {
+    public PermissionManager(ComponentActivity activity, PermissionCallback callback) {
         this.activity = activity;
         this.callback = callback;
         registerLauncher();

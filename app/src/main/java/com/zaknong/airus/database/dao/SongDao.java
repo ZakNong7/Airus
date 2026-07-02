@@ -38,6 +38,9 @@ public interface SongDao {
     @Update
     void updateSong(Song song);
 
+    @Update
+    void updateAll(List<Song> songs);
+
     @Delete
     void deleteSong(Song song);
 
@@ -173,6 +176,21 @@ public interface SongDao {
 
     @Query("SELECT COUNT(DISTINCT artist) FROM songs")
     LiveData<Integer> getArtistCount();
+
+    @Query("SELECT DISTINCT album as album, artist as artist, album_art_path as album_art_path FROM songs WHERE album IS NOT NULL AND album != '' ORDER BY album ASC")
+    LiveData<List<AlbumInfo>> getAllAlbums();
+
+    @Query("SELECT * FROM songs WHERE album = :albumName ORDER BY disc_number ASC, track_number ASC")
+    LiveData<List<Song>> getSongsByAlbumName(String albumName);
+
+    @Query("SELECT DISTINCT artist FROM songs WHERE artist IS NOT NULL AND artist != '' ORDER BY artist ASC")
+    LiveData<List<String>> getAllArtists();
+
+    class AlbumInfo {
+        public String album;
+        public String artist;
+        public String album_art_path;
+    }
 
     // Tambahkan di SongDao.java:
     @Query("SELECT * FROM songs WHERE sample_rate = 0 AND is_dsd = 0")

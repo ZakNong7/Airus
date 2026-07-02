@@ -3,6 +3,7 @@
 #include "WavDecoder.h"
 #include <cstring>
 #include <algorithm>
+#include <unistd.h>
 
 namespace airus {
 
@@ -10,12 +11,19 @@ namespace airus {
 // Open + Parse Header
 // =========================================================
 
-    bool WavDecoder::open(const std::string& filePath) {
+    bool WavDecoder::open(const std::string& filePath, int fd) {
         close();
 
-        file = fopen(filePath.c_str(), "rb");
+        if (fd >= 0) {
+            int dupFd = ::dup(fd);
+            WAV_LOGI("WavDecoder::open: Membuka dupFd=%d (dari fd=%d) via fdopen", dupFd, fd);
+            file = fdopen(dupFd, "rb");
+        } else {
+            WAV_LOGI("WavDecoder::open: Membuka path=%s via fopen", filePath.c_str());
+            file = fopen(filePath.c_str(), "rb");
+        }
         if (!file) {
-            WAV_LOGE("Gagal buka file: %s", filePath.c_str());
+            WAV_LOGE("Gagal buka file WAV: %s (fd=%d), errno=%d (%s)", filePath.c_str(), fd, errno, strerror(errno));
             return false;
         }
 
@@ -24,6 +32,8 @@ namespace airus {
             close();
             return false;
         }
+
+        readBuffer.resize(262144); // 256KB reuse buffer
 
         WAV_LOGI("WAV opened: %dHz / %dbit / %dch | %ld frames",
                  info.sampleRate, info.bitDepth,
@@ -37,6 +47,8 @@ namespace airus {
             file = nullptr;
         }
         info = WavInfo{};
+        readBuffer.clear();
+        readBuffer.shrink_to_fit();
         currentFrame = 0;
     }
 
@@ -148,49 +160,109 @@ namespace airus {
 
     size_t WavDecoder::decodeFrames(std::vector<float>& outBuffer,
                                     size_t maxFrames) {
-        if (!info.valid || !file) return 0;
+        if (!info.valid || !file || readBuffer.empty()) return 0;
 
-        int    bytesPerSample = info.bitDepth / 8;
-        size_t framesDecoded  = 0;
+        size_t framesToDecode = std::min(maxFrames, (size_t)(info.totalFrames - currentFrame));
+        if (framesToDecode == 0) return 0;
 
-        // Buffer untuk satu frame (max 2 channel * 4 bytes = 8 bytes)
-        uint8_t sampleBytes[4];
+        int bytesPerSample = info.bitDepth / 8;
+        int bytesPerFrame = bytesPerSample * info.channels;
+        size_t bytesToRead = framesToDecode * bytesPerFrame;
 
-        for (size_t f = 0; f < maxFrames && currentFrame < info.totalFrames; f++) {
-
-            float left  = 0.0f;
-            float right = 0.0f;
-
-            // Baca channel kiri
-            if (fread(sampleBytes, 1, bytesPerSample, file)
-                != (size_t)bytesPerSample) break;
-
-            left = convertToFloat(sampleBytes);
-
-            // Baca channel kanan (atau duplikat mono)
-            if (info.channels == 2) {
-                if (fread(sampleBytes, 1, bytesPerSample, file)
-                    != (size_t)bytesPerSample) break;
-                right = convertToFloat(sampleBytes);
-            } else {
-                // Mono → duplikat ke stereo
-                right = left;
-            }
-
-            outBuffer.push_back(left);
-            outBuffer.push_back(right);
-
-            currentFrame++;
-            framesDecoded++;
+        if (bytesToRead > readBuffer.size()) {
+            bytesToRead = readBuffer.size() - (readBuffer.size() % bytesPerFrame);
+            framesToDecode = bytesToRead / bytesPerFrame;
         }
 
-        return framesDecoded;
+        size_t bytesRead = fread(readBuffer.data(), 1, bytesToRead, file);
+        size_t actualFrames = bytesRead / bytesPerFrame;
+        if (actualFrames == 0) return 0;
+
+        size_t currentSize = outBuffer.size();
+        outBuffer.resize(currentSize + actualFrames * 2);
+        float* out = outBuffer.data() + currentSize;
+
+        const uint8_t* p = readBuffer.data();
+
+        if (info.bitDepth == 16) {
+            // PCM 16-bit
+            const int16_t* src = reinterpret_cast<const int16_t*>(p);
+            if (info.channels == 2) {
+                for (size_t f = 0; f < actualFrames; f++) {
+                    *out++ = src[f * 2] / 32768.0f;
+                    *out++ = src[f * 2 + 1] / 32768.0f;
+                }
+            } else {
+                for (size_t f = 0; f < actualFrames; f++) {
+                    float val = src[f] / 32768.0f;
+                    *out++ = val;
+                    *out++ = val;
+                }
+            }
+        } else if (info.bitDepth == 32 && info.audioFormat == 3) {
+            // IEEE Float 32-bit: Direct copy / fast unpack
+            const float* src = reinterpret_cast<const float*>(p);
+            if (info.channels == 2) {
+                std::memcpy(out, src, actualFrames * 2 * sizeof(float));
+            } else {
+                for (size_t f = 0; f < actualFrames; f++) {
+                    *out++ = src[f];
+                    *out++ = src[f];
+                }
+            }
+        } else if (info.bitDepth == 32) {
+            // PCM 32-bit Integer
+            const int32_t* src = reinterpret_cast<const int32_t*>(p);
+            if (info.channels == 2) {
+                for (size_t f = 0; f < actualFrames; f++) {
+                    *out++ = src[f * 2] / 2147483648.0f;
+                    *out++ = src[f * 2 + 1] / 2147483648.0f;
+                }
+            } else {
+                for (size_t f = 0; f < actualFrames; f++) {
+                    float val = src[f] / 2147483648.0f;
+                    *out++ = val;
+                    *out++ = val;
+                }
+            }
+        } else if (info.bitDepth == 24) {
+            // PCM 24-bit
+            for (size_t f = 0; f < actualFrames; f++) {
+                int32_t s1 = p[0] | (p[1] << 8) | (p[2] << 16);
+                if (s1 & 0x800000) s1 |= 0xFF000000;
+                *out++ = s1 / 8388608.0f;
+                p += 3;
+                if (info.channels == 2) {
+                    int32_t s2 = p[0] | (p[1] << 8) | (p[2] << 16);
+                    if (s2 & 0x800000) s2 |= 0xFF000000;
+                    *out++ = s2 / 8388608.0f;
+                    p += 3;
+                } else {
+                    *out++ = s1 / 8388608.0f;
+                }
+            }
+        } else {
+            // Fallback
+            for (size_t f = 0; f < actualFrames; f++) {
+                float left = convertToFloat(p);
+                p += bytesPerSample;
+                float right = (info.channels == 2) ? convertToFloat(p) : left;
+                if (info.channels == 2) p += bytesPerSample;
+
+                *out++ = left;
+                *out++ = right;
+            }
+        }
+
+        currentFrame += (long)actualFrames;
+        return actualFrames;
     }
 
     float WavDecoder::convertToFloat(const uint8_t* bytes) {
         switch (info.bitDepth) {
             case 16: {
-                int16_t s = (int16_t)(bytes[0] | (bytes[1] << 8));
+                int16_t s;
+                std::memcpy(&s, bytes, 2);
                 return s / 32768.0f;
             }
             case 24: {
@@ -203,12 +275,12 @@ namespace airus {
                 if (info.audioFormat == 3) {
                     // IEEE float 32-bit — langsung copy
                     float f;
-                    memcpy(&f, bytes, 4);
+                    std::memcpy(&f, bytes, 4);
                     return f;
                 } else {
                     // PCM 32-bit integer
-                    int32_t s = bytes[0] | (bytes[1] << 8) |
-                                (bytes[2] << 16) | (bytes[3] << 24);
+                    int32_t s;
+                    std::memcpy(&s, bytes, 4);
                     return s / 2147483648.0f;
                 }
             }

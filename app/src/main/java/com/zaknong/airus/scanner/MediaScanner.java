@@ -13,6 +13,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase;
 
 import com.zaknong.airus.database.AppDatabase;
 import com.zaknong.airus.database.entity.Album;
+import androidx.documentfile.provider.DocumentFile;
+import com.zaknong.airus.database.entity.ScanFolder;
 import com.zaknong.airus.database.entity.Song;
 import com.zaknong.airus.engine.AudioFormatRouter;
 
@@ -141,19 +143,59 @@ public class MediaScanner {
         ScanStats stats = new ScanStats();
 
         // Step 1: Kumpulkan semua path yang sudah ada di database
-        // untuk deteksi file yang dihapus dari storage
         List<Song> existingSongs = getAllSongsSync();
         Map<String, Song> existingPathMap = new HashMap<>();
         for (Song s : existingSongs) {
             existingPathMap.put(s.filePath, s);
         }
 
-        // Step 2: Scan via MediaStore (cepat)
+        // Ambil daftar folder dari database
+        List<ScanFolder> folders = database.scanFolderDao().getAllFoldersSync();
         List<String> foundPaths = new ArrayList<>();
-        scanViaMediaStore(foundPaths, existingPathMap, stats);
 
-        // Step 3: Folder scan untuk DSD dan file yang terlewat MediaStore
-        scanDsdFiles(foundPaths, existingPathMap, stats);
+        if (folders == null || folders.isEmpty()) {
+            // Default: Scan via MediaStore (seluruh device)
+            scanViaMediaStore(foundPaths, existingPathMap, stats);
+            // Scan DSD di folder Music default
+            scanDsdFiles(foundPaths, existingPathMap, stats);
+        } else {
+            // Scan hanya folder yang dipilih
+            List<Song> toInsert = new ArrayList<>();
+            List<Song> toUpdate = new ArrayList<>();
+            
+            for (ScanFolder folder : folders) {
+                if (folder.path.startsWith("content://")) {
+                    // This is a SAF URI
+                    try {
+                        Uri treeUri = Uri.parse(folder.path);
+                        DocumentFile root = DocumentFile.fromTreeUri(context, treeUri);
+                        if (root != null && root.isDirectory()) {
+                            scanSafDocumentRecursive(root, foundPaths, existingPathMap, stats, toInsert, toUpdate);
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error scanning SAF folder: " + folder.path, e);
+                    }
+                } else {
+                    File dir = new File(folder.path);
+                    if (dir.exists() && dir.isDirectory()) {
+                        performFolderScanRecursive(dir, foundPaths, existingPathMap, stats, toInsert, toUpdate);
+                    }
+                }
+                
+                // Periodic flush during folder scans
+                if (toInsert.size() >= 50) {
+                    database.songDao().insertAll(toInsert);
+                    toInsert.clear();
+                }
+                if (toUpdate.size() >= 50) {
+                    database.songDao().updateAll(toUpdate);
+                    toUpdate.clear();
+                }
+            }
+            // Final flush for folder scans
+            if (!toInsert.isEmpty()) database.songDao().insertAll(toInsert);
+            if (!toUpdate.isEmpty()) database.songDao().updateAll(toUpdate);
+        }
 
         // Step 4: Hapus lagu dari database yang file-nya sudah tidak ada
         removeOrphanedSongs(existingPathMap, foundPaths, stats);
@@ -166,6 +208,173 @@ public class MediaScanner {
 
         scanProgress.postValue(
                 ScanProgress.finished(stats.newSongs, stats.updatedSongs, stats.removedSongs));
+    }
+
+    private void scanSafDocumentRecursive(DocumentFile parent, List<String> foundPaths,
+                                         Map<String, Song> existingMap, ScanStats stats,
+                                         List<Song> toInsert, List<Song> toUpdate) {
+        DocumentFile[] files = parent.listFiles();
+        for (DocumentFile f : files) {
+            if (f.isDirectory()) {
+                scanSafDocumentRecursive(f, foundPaths, existingMap, stats, toInsert, toUpdate);
+            } else {
+                String name = f.getName();
+                if (name == null || !AudioFormatRouter.isSupported(name)) continue;
+
+                // For SAF, we might not have a clean file path.
+                // We'll use the URI as the identifier in the database if necessary,
+                // but let's try to get a path if possible.
+                String path = f.getUri().toString();
+                foundPaths.add(path);
+
+                Song existingSong = existingMap.get(path);
+                long dateModified = f.lastModified();
+
+                if (existingSong != null && existingSong.dateModified == dateModified) {
+                    continue;
+                }
+
+                // We need to adapt buildSongFromFile to handle URIs or DocumentFiles
+                Song song = buildSongFromDocumentFile(f);
+                if (song == null) continue;
+
+                // deteksi album_art_path dari folder jika ada
+                if (song.albumArtPath == null) {
+                    File cover = findCoverInFolder(song.folderPath);
+                    if (cover != null) song.albumArtPath = cover.getAbsolutePath();
+                }
+
+                // deteksi album_art_path dari folder jika ada
+                if (song.albumArtPath == null) {
+                    File cover = findCoverInFolder(song.folderPath);
+                    if (cover != null) song.albumArtPath = cover.getAbsolutePath();
+                }
+
+                // deteksi album_art_path dari folder jika ada
+                if (song.albumArtPath == null) {
+                    File cover = findCoverInFolder(song.folderPath);
+                    if (cover != null) song.albumArtPath = cover.getAbsolutePath();
+                }
+
+                if (existingSong != null) {
+                    song.id = existingSong.id;
+                    song.playCount = existingSong.playCount;
+                    song.lastPlayed = existingSong.lastPlayed;
+                    song.isFavorite = existingSong.isFavorite;
+                    song.rating = existingSong.rating;
+                    toUpdate.add(song);
+                    stats.updatedSongs++;
+                } else {
+                    toInsert.add(song);
+                    stats.newSongs++;
+                }
+
+                if (toInsert.size() >= 50) {
+                    database.songDao().insertAll(toInsert);
+                    toInsert.clear();
+                }
+                if (toUpdate.size() >= 50) {
+                    database.songDao().updateAll(toUpdate);
+                    toUpdate.clear();
+                }
+            }
+        }
+    }
+
+    private Song buildSongFromDocumentFile(DocumentFile f) {
+        // Implementation similar to buildSongFromFile but using f.getUri()
+        // For simplicity in this fix, we'll try to use a basic placeholder or 
+        // implement proper metadata extraction via ContentResolver
+        Song s = new Song();
+        s.filePath = f.getUri().toString();
+        s.fileName = f.getName();
+        String name = f.getName();
+        int dot = name.lastIndexOf('.');
+        s.title = dot > 0 ? name.substring(0, dot) : name;
+        s.dateAdded = System.currentTimeMillis();
+        s.dateModified = f.lastModified();
+        s.fileSize = f.length();
+        
+        AudioFormatRouter.FormatInfo info = AudioFormatRouter.getFormatInfo(name);
+        if (info != null) {
+            s.format = info.displayName;
+            s.isLossless = info.isLossless;
+            s.isDsd = info.isDsd;
+            s.isHiRes = info.isDsd;
+        }
+        
+        return s;
+    }
+
+    /**
+     * Scan folder secara rekursif (File API).
+     */
+    private void performFolderScanRecursive(File dir, List<String> foundPaths,
+                                          Map<String, Song> existingMap, ScanStats stats,
+                                          List<Song> toInsert, List<Song> toUpdate) {
+        File[] files = dir.listFiles();
+        if (files == null) return;
+
+        for (File f : files) {
+            if (f.isDirectory()) {
+                performFolderScanRecursive(f, foundPaths, existingMap, stats, toInsert, toUpdate);
+            } else {
+                String path = f.getAbsolutePath();
+                if (!AudioFormatRouter.isSupported(path)) continue;
+
+                foundPaths.add(path);
+                
+                Song existingSong = existingMap.get(path);
+                long dateModified = f.lastModified();
+
+                if (existingSong != null && existingSong.dateModified == dateModified) {
+                    continue;
+                }
+
+                Song song = buildSongFromFile(f);
+                if (song == null) continue;
+
+                // deteksi album_art_path dari folder jika ada
+                if (song.albumArtPath == null) {
+                    File cover = findCoverInFolder(song.folderPath);
+                    if (cover != null) song.albumArtPath = cover.getAbsolutePath();
+                }
+
+                // deteksi album_art_path dari folder jika ada
+                if (song.albumArtPath == null) {
+                    File cover = findCoverInFolder(song.folderPath);
+                    if (cover != null) song.albumArtPath = cover.getAbsolutePath();
+                }
+
+                // deteksi album_art_path dari folder jika ada
+                if (song.albumArtPath == null) {
+                    File cover = findCoverInFolder(song.folderPath);
+                    if (cover != null) song.albumArtPath = cover.getAbsolutePath();
+                }
+
+                if (existingSong != null) {
+                    song.id = existingSong.id;
+                    song.playCount = existingSong.playCount;
+                    song.lastPlayed = existingSong.lastPlayed;
+                    song.isFavorite = existingSong.isFavorite;
+                    song.rating = existingSong.rating;
+                    toUpdate.add(song);
+                    stats.updatedSongs++;
+                } else {
+                    toInsert.add(song);
+                    stats.newSongs++;
+                }
+
+                if (toInsert.size() >= 50) {
+                    database.songDao().insertAll(toInsert);
+                    toInsert.clear();
+                }
+                if (toUpdate.size() >= 50) {
+                    database.songDao().updateAll(toUpdate);
+                    toUpdate.clear();
+                }
+            }
+        }
     }
 
     // =========================================================
@@ -211,6 +420,9 @@ public class MediaScanner {
             Log.d(TAG, "MediaStore menemukan " + totalFromMediaStore + " file");
             int scanned = 0;
 
+            List<Song> toInsert = new ArrayList<>();
+            List<Song> toUpdate = new ArrayList<>();
+
             while (cursor.moveToNext()) {
                 String path = cursor.getString(
                         cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA));
@@ -223,8 +435,8 @@ public class MediaScanner {
                 foundPaths.add(path);
                 scanned++;
 
-                // Update progress setiap 50 file
-                if (scanned % 50 == 0) {
+                // Update progress setiap 100 file
+                if (scanned % 100 == 0) {
                     File f = new File(path);
                     scanProgress.postValue(new ScanProgress(
                             scanned, totalFromMediaStore, f.getName(),
@@ -244,6 +456,24 @@ public class MediaScanner {
                 // File baru atau berubah — baca metadata lengkap
                 Song song = buildSongFromMediaStoreCursor(cursor, path);
 
+                // deteksi album_art_path dari folder jika ada
+                if (song.albumArtPath == null) {
+                    File cover = findCoverInFolder(song.folderPath);
+                    if (cover != null) song.albumArtPath = cover.getAbsolutePath();
+                }
+
+                // deteksi album_art_path dari folder jika ada
+                if (song.albumArtPath == null) {
+                    File cover = findCoverInFolder(song.folderPath);
+                    if (cover != null) song.albumArtPath = cover.getAbsolutePath();
+                }
+
+                // deteksi album_art_path dari folder jika ada
+                if (song.albumArtPath == null) {
+                    File cover = findCoverInFolder(song.folderPath);
+                    if (cover != null) song.albumArtPath = cover.getAbsolutePath();
+                }
+
                 if (existingSong != null) {
                     // Update lagu yang sudah ada
                     song.id = existingSong.id;
@@ -251,14 +481,28 @@ public class MediaScanner {
                     song.lastPlayed  = existingSong.lastPlayed;
                     song.isFavorite  = existingSong.isFavorite;
                     song.rating      = existingSong.rating;
-                    database.songDao().updateSong(song);
+                    toUpdate.add(song);
                     stats.updatedSongs++;
                 } else {
                     // Insert lagu baru
-                    database.songDao().insertSong(song);
+                    toInsert.add(song);
                     stats.newSongs++;
                 }
+
+                // Batch flush ke DB setiap 50 item
+                if (toInsert.size() >= 50) {
+                    database.songDao().insertAll(toInsert);
+                    toInsert.clear();
+                }
+                if (toUpdate.size() >= 50) {
+                    database.songDao().updateAll(toUpdate);
+                    toUpdate.clear();
+                }
             }
+            // Final flush
+            if (!toInsert.isEmpty()) database.songDao().insertAll(toInsert);
+            if (!toUpdate.isEmpty()) database.songDao().updateAll(toUpdate);
+
         } catch (Exception e) {
             Log.e(TAG, "MediaStore scan error: " + e.getMessage(), e);
         }
@@ -277,6 +521,10 @@ public class MediaScanner {
                 cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM));
         song.albumArtist  = cursor.getString(
                 cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ARTIST));
+
+        if (song.artist == null || song.artist.equals("<unknown>")) song.artist = "Unknown Artist";
+        if (song.album == null || song.album.equals("<unknown>")) song.album = "Unknown Album";
+        if (song.albumArtist == null || song.albumArtist.equals("<unknown>")) song.albumArtist = song.artist;
         song.durationMs   = cursor.getLong(
                 cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION));
         song.fileSize     = cursor.getLong(
@@ -370,6 +618,24 @@ public class MediaScanner {
                 }
 
                 Song song = buildSongFromFile(file);
+                // deteksi album_art_path dari folder jika ada
+                if (song.albumArtPath == null) {
+                    File cover = findCoverInFolder(song.folderPath);
+                    if (cover != null) song.albumArtPath = cover.getAbsolutePath();
+                }
+
+                // deteksi album_art_path dari folder jika ada
+                if (song.albumArtPath == null) {
+                    File cover = findCoverInFolder(song.folderPath);
+                    if (cover != null) song.albumArtPath = cover.getAbsolutePath();
+                }
+
+                // deteksi album_art_path dari folder jika ada
+                if (song.albumArtPath == null) {
+                    File cover = findCoverInFolder(song.folderPath);
+                    if (cover != null) song.albumArtPath = cover.getAbsolutePath();
+                }
+
                 if (existingSong != null) {
                     song.id          = existingSong.id;
                     song.playCount   = existingSong.playCount;
@@ -436,6 +702,9 @@ public class MediaScanner {
         int dot = nameWithoutExt.lastIndexOf('.');
         if (dot > 0) nameWithoutExt = nameWithoutExt.substring(0, dot);
         song.title = nameWithoutExt;
+        song.artist = "Unknown Artist";
+        song.album = "Unknown Album";
+        song.albumArtist = "Unknown Artist";
 
         AudioFormatRouter.FormatInfo info =
                 AudioFormatRouter.getFormatInfo(file.getName());
@@ -493,7 +762,7 @@ public class MediaScanner {
             db.execSQL(
                     "INSERT OR REPLACE INTO albums " +
                             "(album_name, album_artist, year, track_count, date_added, " +
-                            " is_lossless, has_hi_res, best_format) " +
+                            " is_lossless, has_hi_res, best_format, album_art_path) " +
                             "SELECT " +
                             "  album, " +
                             "  COALESCE(album_artist, artist) as album_artist, " +
@@ -502,7 +771,8 @@ public class MediaScanner {
                             "  MIN(date_added) as date_added, " +
                             "  MIN(CASE WHEN is_lossless = 0 THEN 0 ELSE 1 END) as is_lossless, " +
                             "  MAX(is_hi_res) as has_hi_res, " +
-                            "  MAX(format) as best_format " +   // simplifikasi, cukup untuk sekarang
+                            "  MAX(format) as best_format, " +
+                            "  MAX(album_art_path) as album_art_path " +
                             "FROM songs " +
                             "WHERE album IS NOT NULL AND album != '' " +
                             "GROUP BY album, COALESCE(album_artist, artist)"
@@ -533,7 +803,7 @@ public class MediaScanner {
         try {
             android.database.Cursor cursor = database.getOpenHelper().getReadableDatabase()
                     .query("SELECT id, file_path, date_modified, play_count, " +
-                            "last_played, is_favorite, rating FROM songs", null);
+                            "last_played, is_favorite, rating FROM songs", new Object[0]);
             return parseSongsFromRaw(cursor);
         } catch (Exception e) {
             Log.e(TAG, "getAllSongsSync error: " + e.getMessage(), e);
@@ -569,6 +839,19 @@ public class MediaScanner {
             cursor.close();
         }
         return songs;
+    }
+
+    private File findCoverInFolder(String folderPath) {
+        if (folderPath == null) return null;
+        File folder = new File(folderPath);
+        if (!folder.exists() || !folder.isDirectory()) return null;
+
+        String[] artNames = {"cover.jpg", "cover.png", "folder.jpg", "folder.png", "album.jpg", "front.jpg"};
+        for (String name : artNames) {
+            File artFile = new File(folder, name);
+            if (artFile.exists()) return artFile;
+        }
+        return null;
     }
 
     private int parseTrackNumber(String trackStr) {

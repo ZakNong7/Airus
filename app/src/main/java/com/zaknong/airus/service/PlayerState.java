@@ -110,6 +110,9 @@ public class PlayerState {
     private final MutableLiveData<Integer> queueSize =
             new MutableLiveData<>(0);
 
+    private final MutableLiveData<java.util.List<Song>> queue =
+            new MutableLiveData<>(new java.util.ArrayList<>());
+
     // =========================================================
     // Error State
     // =========================================================
@@ -146,6 +149,7 @@ public class PlayerState {
     public LiveData<ShuffleMode> getShuffleMode()  { return shuffleMode; }
     public LiveData<Integer> getQueueIndex()       { return queueIndex; }
     public LiveData<Integer> getQueueSize()        { return queueSize; }
+    public LiveData<java.util.List<Song>> getQueue() { return queue; }
     public LiveData<PlayerError> getLastError()    { return lastError; }
 
     // =========================================================
@@ -168,6 +172,7 @@ public class PlayerState {
     public void setShuffleMode(ShuffleMode mode) { shuffleMode.postValue(mode); }
     public void setQueueIndex(int idx)           { queueIndex.postValue(idx); }
     public void setQueueSize(int size)           { queueSize.postValue(size); }
+    public void setQueue(java.util.List<Song> q) { queue.postValue(q); }
     public void setLastError(PlayerError error)  { lastError.postValue(error); }
 
     // =========================================================

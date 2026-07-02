@@ -13,12 +13,17 @@
 #include <android/log.h>
 #include <oboe/Oboe.h>
 #include "decoder/WavDecoder.h"
+#include "decoder/FlacDecoder.h"
+#include "decoder/DsdDecoder.h"
 #include <thread>
+#include <condition_variable>
+#include <unistd.h>
 
 #define LOG_TAG "AirusEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 
 // ============================================================
 // BiQuad Filter — fondasi EQ
@@ -71,9 +76,9 @@ public:
         double a0   = (A+1)-(A-1)*cosW+beta*sinW;
         b0 =  A*((A+1)+(A-1)*cosW+beta*sinW)/a0;
         b1 = -2*A*((A-1)+(A+1)*cosW)/a0;
-        b2 =  A*((A+1)+(A-1)*cosW-beta*sinW)/a0;
+        b2 =  A*((A+1)-(A-1)*cosW-beta*sinW)/a0;
         a1 =  2*((A-1)-(A+1)*cosW)/a0;
-        a2 =  ((A+1)-(A-1)*cosW-beta*sinW)/a0;
+        a2 =  ((A+1)+(A-1)*cosW-beta*sinW)/a0;
     }
 };
 
@@ -286,10 +291,12 @@ public:
     void update(float left, float right) {
         float absL = fabsf(left);
         float absR = fabsf(right);
-        float curL = peakL.load();
-        float curR = peakR.load();
-        peakL.store(absL > curL ? absL : curL * decayRate);
-        peakR.store(absR > curR ? absR : curR * decayRate);
+        float curL = peakL.load(std::memory_order_relaxed);
+        float curR = peakR.load(std::memory_order_relaxed);
+        if (absL > curL) peakL.store(absL, std::memory_order_relaxed);
+        else peakL.store(curL * decayRate, std::memory_order_relaxed);
+        if (absR > curR) peakR.store(absR, std::memory_order_relaxed);
+        else peakR.store(curR * decayRate, std::memory_order_relaxed);
     }
 
     float getPeakL() { return peakL.load(); }
@@ -308,9 +315,11 @@ public:
     // ---- Playback state ----
     std::atomic<bool>  isPlaying{false};
     std::atomic<bool>  isPaused{false};
+    std::atomic<bool>  isEos{false}; // End of stream flag
     std::atomic<float> masterVolume{1.0f};
     std::atomic<long>  currentPositionMs{0};
     std::atomic<long>  durationMs{0};
+    std::atomic<long>  totalFramesPlayed{0};
 
     // ---- Audio properties ----
     int         sampleRate    = 44100;
@@ -325,24 +334,32 @@ public:
     ReplayGainProcessor replayGain;
     GaplessBuffer       gapless;
     PeakMeter           peakMeter;
+
+    // ---- Decoders ----
     std::unique_ptr<airus::WavDecoder> wavDecoder;
+    std::unique_ptr<airus::FlacDecoder> flacDecoder;
+    std::unique_ptr<airus::DsdDecoder> dsdDecoder;
+
     std::thread decoderThread;
     std::atomic<bool> isDecoding{false};
+    std::condition_variable decoderCv;
+    std::mutex decoderMutex;
+    std::recursive_mutex threadSpawnMutex;
 
     // ---- Oboe ----
     std::shared_ptr<oboe::AudioStream> stream;
     std::mutex                         streamMutex;
 
-    // ---- Decoded audio buffer ----
-    // Diisi oleh decoder (FLAC/WAV/MediaCodec) dari thread terpisah.
-    // Dibaca oleh onAudioReady() dari audio thread.
+    // ---- Decoded audio buffer (Circular-like buffer) ----
     std::vector<float>  audioBuffer;
     std::atomic<size_t> readPos{0};
+    std::atomic<size_t> writePos{0};
+    static constexpr size_t BUFFER_CAPACITY = 2 * 1024 * 1024; // 2M samples (~11 seconds stereo @ 96k)
     std::mutex          bufferMutex;
 
     // ---- JNI callbacks ----
     JavaVM*   javaVm  = nullptr;
-    jobject   javaObj = nullptr;  // global ref ke AudioEngine.java
+    jobject   javaObj = nullptr;
 
     // Cached method IDs
     jmethodID midOnTrackCompleted   = nullptr;
@@ -350,10 +367,95 @@ public:
     jmethodID midOnError            = nullptr;
     jmethodID midOnSRChanged        = nullptr;
 
-    // ---- Gapless threshold ----
+    // ---- Event handling ----
+    struct AudioEvent {
+        enum Type { TRACK_COMPLETED, NEARING_END, ERROR_MSG, SR_CHANGED };
+        Type type;
+        uint64_t trackId;
+        long longValue;
+        std::string stringValue;
+        int intValue2;
+    };
+    std::vector<AudioEvent> pendingEvents;
+    std::mutex eventMutex;
+    std::condition_variable eventCv;
+    std::atomic<uint64_t> currentTrackId{0};
+    std::thread eventThread;
+    std::atomic<bool> isEventThreadRunning{false};
+
+    void startEventThread() {
+        isEventThreadRunning = true;
+        eventThread = std::thread([this]() {
+            JNIEnv* env = nullptr;
+            if (javaVm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+                LOGE("Gagal attach event thread ke JVM");
+                return;
+            }
+            while (isEventThreadRunning) {
+                std::vector<AudioEvent> eventsToProcess;
+                {
+                    std::unique_lock<std::mutex> lock(eventMutex);
+                    if (pendingEvents.empty() && isEventThreadRunning) {
+                        eventCv.wait_for(lock, std::chrono::milliseconds(100));
+                    }
+                    if (!isEventThreadRunning) break;
+                    if (!pendingEvents.empty()) {
+                        eventsToProcess = std::move(pendingEvents);
+                        pendingEvents.clear();
+                    }
+                }
+                for (const auto& ev : eventsToProcess) {
+                    if (ev.trackId != currentTrackId.load()) {
+                        LOGD("Event Thread: Mengabaikan event lama (ev.trackId=%lu, currentTrackId=%lu)",
+                             (unsigned long)ev.trackId, (unsigned long)currentTrackId.load());
+                        continue;
+                    }
+                    if (!javaObj) continue;
+                    if (ev.type == AudioEvent::TRACK_COMPLETED && midOnTrackCompleted) {
+                        env->CallVoidMethod(javaObj, midOnTrackCompleted);
+                    } else if (ev.type == AudioEvent::NEARING_END && midOnNearingEnd) {
+                        env->CallVoidMethod(javaObj, midOnNearingEnd, (jlong)ev.longValue);
+                    } else if (ev.type == AudioEvent::ERROR_MSG && midOnError) {
+                        jstring jmsg = env->NewStringUTF(ev.stringValue.c_str());
+                        env->CallVoidMethod(javaObj, midOnError, (jint)ev.intValue2, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    } else if (ev.type == AudioEvent::SR_CHANGED && midOnSRChanged) {
+                        env->CallVoidMethod(javaObj, midOnSRChanged, (jint)ev.longValue, (jint)ev.intValue2);
+                    }
+                }
+            }
+            javaVm->DetachCurrentThread();
+        });
+    }
+
+    void stopEventThread() {
+        isEventThreadRunning = false;
+        eventCv.notify_all();
+        if (eventThread.joinable()) {
+            eventThread.join();
+        }
+    }
+
+    void postEvent(AudioEvent ev) {
+        ev.trackId = currentTrackId.load();
+        std::lock_guard<std::mutex> lock(eventMutex);
+        pendingEvents.push_back(ev);
+        eventCv.notify_all();
+    }
+
+    void clearPendingEvents() {
+        std::lock_guard<std::mutex> lock(eventMutex);
+        pendingEvents.clear();
+    }
+
     // Trigger preload saat sisa buffer < 5 detik
     static constexpr long NEAR_END_THRESHOLD_MS = 5000;
     std::atomic<bool> nearEndNotified{false};
+
+    AirusAudioEngine() {
+        audioBuffer.resize(BUFFER_CAPACITY);
+    }
+
 
     // =========================================================
     // Init Oboe Stream
@@ -362,7 +464,6 @@ public:
     bool openStream(int sr, int bd) {
         std::lock_guard<std::mutex> lock(streamMutex);
 
-        // Tutup stream lama jika ada
         if (stream) {
             stream->requestStop();
             stream->close();
@@ -377,22 +478,24 @@ public:
         builder.setDataCallback(this)
                 ->setErrorCallback(this)
                 ->setDirection(oboe::Direction::Output)
-                        // Exclusive mode = bypass Android audio mixer = bit-perfect
                 ->setSharingMode(oboe::SharingMode::Exclusive)
                 ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
                 ->setFormat(oboe::AudioFormat::Float)
                 ->setChannelCount(oboe::ChannelCount::Stereo)
                 ->setSampleRate(sr)
-                        // Jika DAC tidak support SR ini, Oboe akan resample
-                        // dengan kualitas terbaik yang tersedia
+                ->setUsage(oboe::Usage::Media)
+                ->setContentType(oboe::ContentType::Music)
                 ->setSampleRateConversionQuality(
                         oboe::SampleRateConversionQuality::Best);
+
+        if (sr > 96000) {
+            builder.setFramesPerCallback(1024); // Larger chunks for very high res
+        }
 
         oboe::Result result = builder.openStream(stream);
 
         if (result != oboe::Result::OK) {
             LOGE("Gagal buka Oboe stream: %s", oboe::convertToText(result));
-            // Fallback ke Shared mode jika Exclusive tidak tersedia
             builder.setSharingMode(oboe::SharingMode::Shared);
             result = builder.openStream(stream);
             if (result != oboe::Result::OK) {
@@ -400,14 +503,14 @@ public:
                      oboe::convertToText(result));
                 return false;
             }
-            LOGI("Fallback ke Shared mode (bukan bit-perfect)");
         }
 
         stream->requestStart();
-        LOGI("Oboe stream: %dHz / %dbit | Mode: %s",
-             sr, bd,
-             stream->getSharingMode() == oboe::SharingMode::Exclusive
-             ? "Exclusive (bit-perfect)" : "Shared");
+        LOGI("Oboe Stream dibuka: %dHz, %dch, format=%s, latency=%s, bufferSize=%d",
+             stream->getSampleRate(), stream->getChannelCount(),
+             oboe::convertToText(stream->getFormat()),
+             oboe::convertToText(stream->getPerformanceMode()),
+             stream->getBufferSizeInFrames());
         return true;
     }
 
@@ -415,99 +518,226 @@ public:
     // Load + Play
     // =========================================================
 
-    bool loadAndPlay(const std::string &path, const std::string &fmt,
+    bool loadAndPlay(const std::string &path, int fd, const std::string &fmt,
                      int sr, int bd) {
+        std::lock_guard<std::recursive_mutex> threadLock(threadSpawnMutex);
+        currentTrackId++;
+        isEos = false;
+
+        // Stop any current decoding
+        isDecoding = false;
+        if (flacDecoder) {
+            flacDecoder->isAborting = true;
+        }
+        {
+            std::lock_guard<std::mutex> lock(decoderMutex);
+            decoderCv.notify_all();
+        }
+        if (decoderThread.joinable()) decoderThread.join();
+        clearPendingEvents();
+
+        // Reset decoders to ensure new file is opened
+        wavDecoder.reset();
+        flacDecoder.reset();
+        dsdDecoder.reset();
+
         currentFilePath = path;
         currentFormat   = fmt;
 
-        // Jika sample rate berbeda dari stream aktif, re-open stream
         if (!stream || sampleRate != sr) {
-            if (!openStream(sr, bd)) return false;
-            // Notifikasi Java bahwa SR berubah
+            if (!openStream(sr, bd)) {
+                if (fd >= 0) ::close(fd);
+                return false;
+            }
             callOnSampleRateChanged(sr, bd);
         }
 
         // Reset state
         {
             std::lock_guard<std::mutex> lock(bufferMutex);
-            audioBuffer.clear();
             readPos = 0;
+            writePos = 0;
         }
         currentPositionMs = 0;
         durationMs        = 0;
+        totalFramesPlayed = 0;
         nearEndNotified   = false;
         eq.reset();
         crossfeed.reset();
 
-        // ---- Decode WAV di background thread ----
-        if (fmt == "WAV" || fmt == "AIFF") {
-            isDecoding = true;
+        if (fmt != "MEDIACODEC") {
+            isPlaying = true; // Set playing before starting decoder thread
+            isPaused = false;
+            startDecoderThread(path, fd, fmt);
+        } else {
+            isPlaying = true;
+            isPaused = false;
+            isDecoding = false;
+            if (fd >= 0) ::close(fd);
+        }
+        return true;
+    }
 
-            // Jalankan decode di thread terpisah
-            // agar tidak block audio callback
-            if (decoderThread.joinable()) decoderThread.join();
+    void startDecoderThread(const std::string &path, int fd, const std::string &fmt) {
+        std::lock_guard<std::recursive_mutex> threadLock(threadSpawnMutex);
+        // Stop and wait for the previous decoder thread to exit before starting a new one
+        isDecoding = false;
+        if (flacDecoder) {
+            flacDecoder->isAborting = true;
+        }
+        {
+            std::lock_guard<std::mutex> lock(decoderMutex);
+            decoderCv.notify_all();
+        }
+        if (decoderThread.joinable()) {
+            decoderThread.join();
+        }
 
-            decoderThread = std::thread([this, path, sr, bd]() {
-                airus::WavDecoder decoder;
-                if (!decoder.open(path)) {
-                    LOGE("WavDecoder gagal buka: %s", path.c_str());
+        isEos = false;
+        isDecoding = true;
+        decoderThread = std::thread([this, path, fd, fmt]() {
+            int headerSr = 44100;
+            int headerBd = 16;
+
+            if (fmt == "WAV" || fmt == "AIFF") {
+                if (!wavDecoder) wavDecoder = std::make_unique<airus::WavDecoder>();
+                LOGD("startDecoderThread: membuka WAV dengan fd=%d", fd);
+                if (!wavDecoder->open(path, fd)) {
                     isDecoding = false;
                     callOnError(-1, "Gagal membuka file WAV");
                     return;
                 }
-
-                // Update info dari header file
-                // (lebih akurat dari database)
-                sampleRate = decoder.getInfo().sampleRate;
-                bitDepth   = decoder.getInfo().bitDepth;
-                channels   = decoder.getInfo().channels;
-                durationMs = (long)(decoder.getInfo().totalFrames
-                                    * 1000L / sampleRate);
-
-                // Decode semua ke buffer
-                // Untuk file besar (>30 menit), gunakan decodeFrames()
-                // secara bertahap. Untuk sekarang decode sekaligus.
-                std::vector<float> decoded;
-                size_t frames = decoder.decodeAll(decoded);
-
-                if (frames == 0) {
-                    LOGE("WavDecoder: tidak ada frame yang didecode");
+                headerSr = wavDecoder->getInfo().sampleRate;
+                headerBd = wavDecoder->getInfo().bitDepth;
+                durationMs = (long)(wavDecoder->getInfo().totalFrames * 1000L / headerSr);
+                if (currentPositionMs > 0) {
+                    wavDecoder->seekToFrame((long)((currentPositionMs / 1000.0) * headerSr));
+                }
+            } else if (fmt == "FLAC") {
+                if (!flacDecoder) flacDecoder = std::make_unique<airus::FlacDecoder>();
+                LOGD("startDecoderThread: membuka FLAC dengan fd=%d", fd);
+                if (!flacDecoder->open(path, fd)) {
                     isDecoding = false;
-                    callOnError(-2, "File WAV kosong atau corrupt");
+                    callOnError(-10, "Gagal membuka file FLAC");
                     return;
                 }
-
-                // Salin ke audioBuffer (thread-safe)
-                {
-                    std::lock_guard<std::mutex> lock(bufferMutex);
-                    audioBuffer = std::move(decoded);
-                    readPos     = 0;
+                headerSr = flacDecoder->getInfo().sampleRate;
+                headerBd = flacDecoder->getInfo().bitDepth;
+                durationMs = (long)(flacDecoder->getInfo().totalSamples * 1000L / headerSr);
+                if (currentPositionMs > 0) {
+                    flacDecoder->seekToSample((long)((currentPositionMs / 1000.0) * headerSr));
                 }
+            } else if (fmt == "DSD" || fmt == "DSF" || fmt == "DFF") {
+                if (!dsdDecoder) dsdDecoder = std::make_unique<airus::DsdDecoder>();
+                if (!dsdDecoder->open(path, fd)) {
+                    isDecoding = false;
+                    callOnError(-20, "Gagal membuka file DSD");
+                    return;
+                }
+                headerSr = 44100 * 2; // Decimated
+                headerBd = 24;
+                durationMs = (long)(dsdDecoder->getInfo().totalSamples * 1000L / dsdDecoder->getInfo().sampleRate);
+            } else {
+                headerSr = sampleRate;
+                headerBd = bitDepth;
+            }
 
-                isDecoding  = false;
-                isPlaying   = true;
-                isPaused    = false;
+            if (headerSr > 0 && headerSr != sampleRate) {
+                LOGI("Sample rate mismatch! Header=%d, DB=%d. Reopening stream...", headerSr, sampleRate);
+                openStream(headerSr, headerBd);
+                callOnSampleRateChanged(headerSr, headerBd);
+            }
 
-                LOGI("WAV decoded: %zu frames → %zu samples",
-                     frames, audioBuffer.size());
-            });
+            // We don't force isPlaying = true here anymore.
+            // isPlaying should be set by the caller (loadAndPlay or resume).
 
-            decoderThread.detach();
-            return true;
-        }
+            // Streaming Decode Loop
+            while (isDecoding) {
+                size_t currentWrite = writePos.load();
+                size_t currentRead = readPos.load();
+                size_t available = (currentRead + BUFFER_CAPACITY - currentWrite - 2) % BUFFER_CAPACITY;
 
-        // Format lain (FLAC, MediaCodec) — akan diisi Tahap 6B dan 6C
-        LOGI("Format %s belum didukung — coming soon", fmt.c_str());
-        return false;
+                if (available > 4096) {
+                    std::vector<float> chunk;
+                    size_t framesDecoded = 0;
+                    if (wavDecoder) framesDecoded = wavDecoder->decodeFrames(chunk, 2048);
+                    else if (flacDecoder) {
+                        framesDecoded = flacDecoder->decodeFrames(chunk, 2048);
+                    }
+                    else if (dsdDecoder) framesDecoded = dsdDecoder->decodeFrames(chunk, 2048);
+
+                    if (framesDecoded == 0) {
+                        // Jika flacDecoder ada, cek state-nya
+                        FLAC__StreamDecoderState fState = flacDecoder ? FLAC__stream_decoder_get_state(flacDecoder->getInternalDecoder()) : (FLAC__StreamDecoderState)0;
+
+                        if (flacDecoder && fState < FLAC__STREAM_DECODER_END_OF_STREAM) {
+                             // Belum benar-benar habis, mungkin butuh proses lagi
+                             static int zeroFrameCount = 0;
+                             if (++zeroFrameCount < 100) {
+                                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                                 continue;
+                             }
+                             LOGW("DecoderThread: Terjebak di state %d (0 frames) selama 1 detik, menganggap EOS", (int)fState);
+                             zeroFrameCount = 0;
+                        }
+
+                        if (isDecoding.load()) {
+                            LOGD("DecoderThread: EOF reached for %s (FLAC State=%d)", path.c_str(), (int)fState);
+                            isEos = true;
+                        }
+                        isDecoding = false;
+                        break;
+                    }
+
+
+                    fillBuffer(chunk.data(), chunk.size());
+                } else {
+                    // Buffer full, wait a bit. If buffer is huge, we can wait 50ms.
+                    // If buffer is small, we should wait less.
+                    std::unique_lock<std::mutex> lock(decoderMutex);
+                    decoderCv.wait_for(lock, std::chrono::milliseconds(20));
+                }
+            }
+            if (fd >= 0) {
+                LOGD("DecoderThread: Menutup fd=%d", fd);
+                ::close(fd);
+            }
+        });
     }
 
-    /**
-     * Dipanggil decoder dari thread terpisah untuk mengisi audio buffer.
-     * Thread-safe.
-     */
     void fillBuffer(const float *samples, size_t count) {
+        // Tunggu sampai ada ruang di buffer agar tidak overwrite data yang belum diputar
+        int retry = 0;
+        while (isDecoding || isPlaying) { // Selama aktif, kita tunggu
+            size_t wp = writePos.load();
+            size_t rp = readPos.load();
+            size_t used = (wp + BUFFER_CAPACITY - rp) & (BUFFER_CAPACITY - 1);
+            size_t free = BUFFER_CAPACITY - used - 1;
+
+            if (free >= count) break;
+
+            // Jika macet terlalu lama (misal 5 detik), break saja agar tidak ANR
+            if (++retry > 500) {
+                LOGW("fillBuffer: Timeout menunggu ruang buffer");
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
         std::lock_guard<std::mutex> lock(bufferMutex);
-        audioBuffer.insert(audioBuffer.end(), samples, samples + count);
+        size_t wp = writePos.load();
+
+        size_t spaceToEnd = BUFFER_CAPACITY - wp;
+        if (count <= spaceToEnd) {
+            std::memcpy(&audioBuffer[wp], samples, count * sizeof(float));
+            wp = (wp + count) & (BUFFER_CAPACITY - 1);
+        } else {
+            std::memcpy(&audioBuffer[wp], samples, spaceToEnd * sizeof(float));
+            size_t remaining = count - spaceToEnd;
+            std::memcpy(&audioBuffer[0], samples + spaceToEnd, remaining * sizeof(float));
+            wp = remaining;
+        }
+        writePos.store(wp);
     }
 
     // =========================================================
@@ -517,48 +747,69 @@ public:
     void pause() {
         isPaused  = true;
         isPlaying = false;
-        LOGD("Paused at %ld ms", currentPositionMs.load());
     }
 
     void resume() {
         isPaused  = false;
         isPlaying = true;
-        LOGD("Resumed from %ld ms", currentPositionMs.load());
     }
 
     void stop() {
+        isDecoding = false;
         isPlaying = false;
         isPaused  = false;
         {
             std::lock_guard<std::mutex> lock(bufferMutex);
-            audioBuffer.clear();
             readPos = 0;
+            writePos = 0;
         }
         currentPositionMs = 0;
         nearEndNotified   = false;
         gapless.clear();
-        eq.reset();
-        crossfeed.reset();
     }
 
-    void seekTo(long posMs) {
-        // Hitung sample position dari posMs
-        size_t samplePos = (size_t)((posMs / 1000.0) * sampleRate * channels);
+    void seekTo(long posMs, int fd) {
+        std::lock_guard<std::recursive_mutex> threadLock(threadSpawnMutex);
+        LOGD("seekTo: dipanggil dengan posMs=%ld, fd=%d", posMs, fd);
+        currentTrackId++;
+        isEos = false;
+        // Simple seek: restart decoder at new position
+        isDecoding = false;
+        if (flacDecoder) {
+            flacDecoder->isAborting = true;
+        }
+        if (decoderThread.joinable()) decoderThread.join();
+        clearPendingEvents();
+
         {
             std::lock_guard<std::mutex> lock(bufferMutex);
-            // Clamp ke ukuran buffer
-            if (samplePos > audioBuffer.size()) samplePos = 0;
-            readPos = samplePos;
+            readPos = 0;
+            writePos = 0;
         }
+
+        // Reset existing decoders so we open a new stream with the fresh file descriptor
+        if (wavDecoder) {
+            wavDecoder->close();
+            wavDecoder.reset();
+        }
+        if (flacDecoder) {
+            flacDecoder->close();
+            flacDecoder.reset();
+        }
+        if (dsdDecoder) {
+            dsdDecoder->close();
+            dsdDecoder.reset();
+        }
+
         currentPositionMs = posMs;
+        totalFramesPlayed = (long)((posMs / 1000.0) * sampleRate);
         nearEndNotified   = false;
-        eq.reset();
-        crossfeed.reset();
-        LOGD("Seeked to %ld ms (sample %zu)", posMs, samplePos);
+        startDecoderThread(currentFilePath, fd, currentFormat);
     }
 
     void release() {
         stop();
+        stopEventThread();
         std::lock_guard<std::mutex> lock(streamMutex);
         if (stream) {
             stream->requestStop();
@@ -566,12 +817,10 @@ public:
             stream.reset();
         }
         releaseJavaRef();
-        LOGI("AirusEngine released");
     }
 
     // =========================================================
-    // Oboe Audio Callback — HIGH PRIORITY THREAD
-    // Tidak boleh: alloc heap, lock mutex lama, system call
+    // Oboe Audio Callback
     // =========================================================
 
     oboe::DataCallbackResult onAudioReady(
@@ -580,432 +829,227 @@ public:
             int32_t numFrames) override {
 
         auto* out = static_cast<float*>(audioData);
-        int   totalSamples = numFrames * 2; // stereo
-
         if (!isPlaying || isPaused) {
-            memset(out, 0, totalSamples * sizeof(float));
+            memset(out, 0, numFrames * 2 * sizeof(float));
             return oboe::DataCallbackResult::Continue;
         }
 
-        size_t rp       = readPos.load();
-        size_t bufSize  = audioBuffer.size(); // snapshot — lock-free approx
+        size_t rp = readPos.load();
+        size_t wp = writePos.load();
+        int samplesRead = 0;
 
         for (int i = 0; i < numFrames; i++) {
-            float left  = 0.0f;
-            float right = 0.0f;
+            float left = 0.0f, right = 0.0f;
+            if (rp != wp) {
+                left = audioBuffer[rp];
+                rp = (rp + 1) & (BUFFER_CAPACITY - 1);
 
-            if (rp + 1 < bufSize) {
-                left  = audioBuffer[rp];
-                right = audioBuffer[rp + 1];
-                rp   += 2;
+                if (rp != wp) {
+                    right = audioBuffer[rp];
+                    rp = (rp + 1) & (BUFFER_CAPACITY - 1);
+                }
+                samplesRead += 2;
             } else {
-                // Buffer habis
-                if (gapless.hasNext()) {
-                    // Gapless: langsung lanjut ke lagu berikutnya
-                    // tanpa gap. Notifikasi Java untuk update UI.
-                    callOnTrackCompleted();
+                // Buffer empty
+                if (isEos.load()) {
+                    LOGD("onAudioReady: EOS triggered (isEos=true, buffer empty)");
+                    isEos = false; // Reset to prevent multiple triggerings
+                    if (gapless.hasNext()) {
+                        // Logic to switch to next track for gapless
+                        callOnTrackCompleted();
+                    } else {
+                        isPlaying = false;
+                        callOnTrackCompleted();
+                        memset(out + i*2, 0, (numFrames-i)*2*sizeof(float));
+                        break;
+                    }
                 } else {
-                    isPlaying = false;
-                    callOnTrackCompleted();
+                    // Just play silence and wait for more data (buffering)
                     memset(out + i*2, 0, (numFrames-i)*2*sizeof(float));
                     break;
                 }
             }
+            // ... (rest of DSP)
 
-            // Update posisi (approximate, tanpa lock)
-            currentPositionMs = (long)((rp / 2) * 1000L / sampleRate);
-
-            // Cek near-end untuk trigger gapless preload
-            long remaining = durationMs.load() - currentPositionMs.load();
-            if (!nearEndNotified.load() &&
-                remaining > 0 && remaining <= NEAR_END_THRESHOLD_MS) {
-                nearEndNotified = true;
-                callOnNearingEnd(remaining);
-            }
-
-            // ==================================================
-            // DSP Chain
-            // Urutan penting: ReplayGain → EQ → Crossfeed → Volume
-            // ==================================================
-
-            // 1. ReplayGain — normalisasi level antar lagu
-            left  = replayGain.process(left);
+            // DSP
+            left = replayGain.process(left);
             right = replayGain.process(right);
-
-            // 2. EQ — hanya jika enabled
-            //    jika disabled = bit-perfect: sinyal tidak disentuh
-            if (eq.enabled) {
-                eq.processStereo(left, right);
-            }
-
-            // 3. Crossfeed — simulasi loudspeaker untuk headphone
+            if (eq.enabled) eq.processStereo(left, right);
             crossfeed.process(left, right);
-
-            // 4. Master volume
             float vol = masterVolume.load();
-            left  *= vol;
-            right *= vol;
+            left *= vol; right *= vol;
 
-            // 5. Soft clip — cegah hard clipping di ujung chain
-            //    tanh memberikan soft saturation yang lebih natural
-            //    dari hard clip (min/max)
-            left  = tanhf(left);
-            right = tanhf(right);
+            if (left > 1.0f) left = 1.0f; else if (left < -1.0f) left = -1.0f;
+            if (right > 1.0f) right = 1.0f; else if (right < -1.0f) right = -1.0f;
+            if ((i & 0xF) == 0) peakMeter.update(left, right);
 
-            // 6. Peak meter
-            peakMeter.update(left, right);
-
-            out[i*2]     = left;
+            out[i*2] = left;
             out[i*2 + 1] = right;
         }
 
         readPos.store(rp);
+        totalFramesPlayed += (samplesRead / 2);
+
+        if (isPlaying && !isPaused) {
+            currentPositionMs = (long)(totalFramesPlayed.load() * 1000L / (sampleRate > 0 ? sampleRate : 44100));
+            long remaining = durationMs.load() - currentPositionMs.load();
+            if (!nearEndNotified.load() && remaining > 0 && remaining <= NEAR_END_THRESHOLD_MS) {
+                nearEndNotified = true;
+                callOnNearingEnd(remaining);
+            }
+        }
+
+        decoderCv.notify_all();
         return oboe::DataCallbackResult::Continue;
     }
 
-    // =========================================================
-    // Oboe Error Callback
-    // =========================================================
-
     void onErrorAfterClose(oboe::AudioStream* /*stream*/,
                            oboe::Result result) override {
-        LOGE("Oboe error: %s", oboe::convertToText(result));
         if (result == oboe::Result::ErrorDisconnected) {
-            // DAC dicabut atau audio device berubah — restart stream
-            LOGI("Stream disconnected — restart dengan internal output");
             openStream(sampleRate, bitDepth);
-            callOnError(static_cast<int>(result),
-                        "Audio device disconnected");
         }
     }
 
-    // =========================================================
-    // JNI Setup
-    // =========================================================
-
+    // JNI Setup and Callbacks
     void setupJavaCallback(JNIEnv* env, jobject obj) {
         env->GetJavaVM(&javaVm);
         if (javaObj) env->DeleteGlobalRef(javaObj);
         javaObj = env->NewGlobalRef(obj);
-
-        // Cache method IDs — hanya sekali, lebih efisien
         jclass cls = env->GetObjectClass(obj);
         midOnTrackCompleted = env->GetMethodID(cls, "onTrackCompleted", "()V");
         midOnNearingEnd     = env->GetMethodID(cls, "onNearingEnd",     "(J)V");
         midOnError          = env->GetMethodID(cls, "onError",          "(ILjava/lang/String;)V");
         midOnSRChanged      = env->GetMethodID(cls, "onSampleRateChanged", "(II)V");
         env->DeleteLocalRef(cls);
+
+        stopEventThread();
+        startEventThread();
     }
 
     void releaseJavaRef() {
+        stopEventThread();
         if (javaVm && javaObj) {
             JNIEnv* env;
-            javaVm->AttachCurrentThread(&env, nullptr);
-            env->DeleteGlobalRef(javaObj);
-            javaVm->DetachCurrentThread();
+            bool isAttached = false;
+            int getEnvRes = javaVm->GetEnv((void**)&env, JNI_VERSION_1_6);
+            if (getEnvRes == JNI_EDETACHED) {
+                if (javaVm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+                    isAttached = true;
+                }
+            }
+
+            if (env) {
+                env->DeleteGlobalRef(javaObj);
+            }
+
+            if (isAttached) {
+                javaVm->DetachCurrentThread();
+            }
             javaObj = nullptr;
         }
     }
 
-    // =========================================================
-    // JNI Callback helpers
-    // Dipanggil dari audio thread — attach/detach thread ke JVM
-    // =========================================================
-
     void callOnTrackCompleted() {
-        JNIEnv* env = attachThread();
-        if (env && javaObj && midOnTrackCompleted)
-            env->CallVoidMethod(javaObj, midOnTrackCompleted);
-        detachThread();
+        postEvent({AudioEvent::TRACK_COMPLETED, 0, 0, "", 0});
     }
-
     void callOnNearingEnd(long remainingMs) {
-        JNIEnv* env = attachThread();
-        if (env && javaObj && midOnNearingEnd)
-            env->CallVoidMethod(javaObj, midOnNearingEnd, (jlong)remainingMs);
-        detachThread();
+        postEvent({AudioEvent::NEARING_END, 0, remainingMs, "", 0});
     }
-
     void callOnError(int code, const std::string& msg) {
-        JNIEnv* env = attachThread();
-        if (env && javaObj && midOnError) {
-            jstring jmsg = env->NewStringUTF(msg.c_str());
-            env->CallVoidMethod(javaObj, midOnError, (jint)code, jmsg);
-            env->DeleteLocalRef(jmsg);
-        }
-        detachThread();
+        postEvent({AudioEvent::ERROR_MSG, 0, 0, msg, code});
     }
-
     void callOnSampleRateChanged(int sr, int bd) {
-        JNIEnv* env = attachThread();
-        if (env && javaObj && midOnSRChanged)
-            env->CallVoidMethod(javaObj, midOnSRChanged, (jint)sr, (jint)bd);
-        detachThread();
+        postEvent({AudioEvent::SR_CHANGED, 0, (long)sr, "", bd});
     }
 
 private:
-    // Track apakah thread ini sudah di-attach sebelumnya
-    // untuk hindari double-attach
     JNIEnv* attachThread() {
         if (!javaVm) return nullptr;
         JNIEnv* env = nullptr;
-        int status = javaVm->GetEnv(
-                reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
-        if (status == JNI_EDETACHED) {
-            javaVm->AttachCurrentThread(&env, nullptr);
-        }
+        if (javaVm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_EDETACHED) javaVm->AttachCurrentThread(&env, nullptr);
         return env;
     }
-
-    void detachThread() {
-        // Jangan detach jika thread ini bukan audio thread
-        // Audio thread Oboe di-manage Oboe sendiri
-        // Hanya detach thread yang kita attach sendiri
-        // Untuk simplisitas: tidak detach di sini,
-        // Oboe audio thread tetap attached sepanjang lifetime stream
-    }
 };
-
-// ============================================================
-// Global engine instance
-// ============================================================
 
 static AirusAudioEngine* g_engine = nullptr;
 static std::mutex        g_engineMutex;
 
-// ============================================================
-// JNI Bridge
-// Package: com.zaknong.airus.engine.AudioEngine
-// ============================================================
-
-#define JNI_FN(name) \
-    Java_com_zaknong_airus_engine_AudioEngine_##name
+#define JNI_FN(name) Java_com_zaknong_airus_engine_AudioEngine_##name
 
 extern "C" {
-
-// ---- Lifecycle ----
-
-JNIEXPORT jboolean JNICALL
-JNI_FN(initialize)(JNIEnv* env, jobject thiz) {
+JNIEXPORT jboolean JNICALL JNI_FN(initialize)(JNIEnv* env, jobject thiz) {
     std::lock_guard<std::mutex> lock(g_engineMutex);
-    if (g_engine) {
-        g_engine->release();
-        delete g_engine;
-    }
+    if (g_engine) { g_engine->release(); delete g_engine; }
     g_engine = new AirusAudioEngine();
     g_engine->setupJavaCallback(env, thiz);
-    bool ok = g_engine->openStream(44100, 16); // default stream
-    LOGI("initialize() -> %s", ok ? "OK" : "FAILED");
-    return (jboolean)ok;
+    return (jboolean)g_engine->openStream(44100, 16);
 }
-
-JNIEXPORT void JNICALL
-JNI_FN(release)(JNIEnv* /*env*/, jobject /*thiz*/) {
+JNIEXPORT void JNICALL JNI_FN(release)(JNIEnv* env, jobject thiz) {
     std::lock_guard<std::mutex> lock(g_engineMutex);
-    if (g_engine) {
-        g_engine->release();
-        delete g_engine;
-        g_engine = nullptr;
-    }
+    if (g_engine) { g_engine->release(); delete g_engine; g_engine = nullptr; }
 }
-
-// ---- Playback — Native Path ----
-
-JNIEXPORT jboolean JNICALL
-JNI_FN(playNative)(JNIEnv* env, jobject /*thiz*/,
-                   jstring jPath, jstring jFormat) {
+JNIEXPORT jboolean JNICALL JNI_FN(playNative)(JNIEnv* env, jobject thiz, jstring jPath, jint jFd, jstring jFormat, jint jSr, jint jBd) {
     if (!g_engine) return JNI_FALSE;
-    const char* path = env->GetStringUTFChars(jPath,   nullptr);
+    const char* path = env->GetStringUTFChars(jPath, nullptr);
     const char* fmt  = env->GetStringUTFChars(jFormat, nullptr);
-
-    // Baca sample rate & bit depth dari database sebelum panggil ini
-    // Untuk sekarang default ke 44100/16 — akan diupdate saat decoder baca header
-    bool ok = g_engine->loadAndPlay(path, fmt, 44100, 16);
-
-    env->ReleaseStringUTFChars(jPath,   path);
+    LOGD("playNative: %s (fd=%d) [%s] %dHz/%dbit", path, jFd, fmt, (int)jSr, (int)jBd);
+    bool ok = g_engine->loadAndPlay(path, (int)jFd, fmt, (int)jSr, (int)jBd);
+    env->ReleaseStringUTFChars(jPath, path);
     env->ReleaseStringUTFChars(jFormat, fmt);
     return (jboolean)ok;
 }
-
-// ---- Playback — MediaCodec Path ----
-
-JNIEXPORT jboolean JNICALL
-JNI_FN(playMediaCodec)(JNIEnv* env, jobject /*thiz*/, jstring jPath) {
+JNIEXPORT jboolean JNICALL JNI_FN(playMediaCodec)(JNIEnv* env, jobject thiz, jstring jPath, jint jSr, jint jBd) {
     if (!g_engine) return JNI_FALSE;
     const char* path = env->GetStringUTFChars(jPath, nullptr);
-    // MediaCodec: format = nama ekstensi, SR & BD dari MediaCodec output
-    bool ok = g_engine->loadAndPlay(path, "MEDIACODEC", 44100, 16);
+    LOGD("playMediaCodec: %s %dHz/%dbit", path, (int)jSr, (int)jBd);
+    bool ok = g_engine->loadAndPlay(path, -1, "MEDIACODEC", (int)jSr, (int)jBd);
     env->ReleaseStringUTFChars(jPath, path);
     return (jboolean)ok;
 }
-
-// ---- Transport ----
-
-JNIEXPORT void JNICALL
-JNI_FN(pause)(JNIEnv* /*env*/, jobject /*thiz*/) {
-    if (g_engine) g_engine->pause();
-}
-
-JNIEXPORT void JNICALL
-JNI_FN(resume)(JNIEnv* /*env*/, jobject /*thiz*/) {
-    if (g_engine) g_engine->resume();
-}
-
-JNIEXPORT void JNICALL
-JNI_FN(stop)(JNIEnv* /*env*/, jobject /*thiz*/) {
-    if (g_engine) g_engine->stop();
-}
-
-JNIEXPORT void JNICALL
-JNI_FN(seekTo)(JNIEnv* /*env*/, jobject /*thiz*/, jlong posMs) {
-    if (g_engine) g_engine->seekTo((long)posMs);
-}
-
-JNIEXPORT jlong JNICALL
-JNI_FN(getPositionMs)(JNIEnv* /*env*/, jobject /*thiz*/) {
-    return g_engine ? (jlong)g_engine->currentPositionMs.load() : 0L;
-}
-
-JNIEXPORT jlong JNICALL
-JNI_FN(getDurationMs)(JNIEnv* /*env*/, jobject /*thiz*/) {
-    return g_engine ? (jlong)g_engine->durationMs.load() : 0L;
-}
-
-// ---- EQ ----
-
-JNIEXPORT void JNICALL
-JNI_FN(setEqEnabled)(JNIEnv* /*env*/, jobject /*thiz*/, jboolean enabled) {
-    if (g_engine) {
-        g_engine->eq.enabled = (bool)enabled;
-        if (!enabled) g_engine->eq.reset(); // reset filter state saat bypass
-        LOGD("EQ %s", enabled ? "ON" : "OFF (bit-perfect)");
-    }
-}
-
-JNIEXPORT void JNICALL
-JNI_FN(setEqBand)(JNIEnv* /*env*/, jobject /*thiz*/,
-                  jint band, jfloat freq, jfloat gainDb, jfloat q) {
-    if (g_engine) g_engine->eq.setBand((int)band, freq, gainDb, q);
-}
-
-JNIEXPORT void JNICALL
-JNI_FN(setEqPreset)(JNIEnv* env, jobject /*thiz*/,
-                    jfloatArray jFreqs, jfloatArray jGains,
-                    jfloatArray jQs,   jfloat preampDb) {
+JNIEXPORT void JNICALL JNI_FN(pause)(JNIEnv* env, jobject thiz) { if (g_engine) g_engine->pause(); }
+JNIEXPORT void JNICALL JNI_FN(resume)(JNIEnv* env, jobject thiz) { if (g_engine) g_engine->resume(); }
+JNIEXPORT void JNICALL JNI_FN(stop)(JNIEnv* env, jobject thiz) { if (g_engine) g_engine->stop(); }
+JNIEXPORT void JNICALL JNI_FN(seekTo)(JNIEnv* env, jobject thiz, jlong posMs, jint fd) { if (g_engine) g_engine->seekTo((long)posMs, (int)fd); }
+JNIEXPORT jlong JNICALL JNI_FN(getPositionMs)(JNIEnv* env, jobject thiz) { return g_engine ? (jlong)g_engine->currentPositionMs.load() : 0L; }
+JNIEXPORT jlong JNICALL JNI_FN(getDurationMs)(JNIEnv* env, jobject thiz) { return g_engine ? (jlong)g_engine->durationMs.load() : 0L; }
+JNIEXPORT void JNICALL JNI_FN(setEqEnabled)(JNIEnv* env, jobject thiz, jboolean enabled) { if (g_engine) g_engine->eq.enabled = (bool)enabled; }
+JNIEXPORT void JNICALL JNI_FN(setEqBand)(JNIEnv* env, jobject thiz, jint band, jfloat freq, jfloat gainDb, jfloat q) { if (g_engine) g_engine->eq.setBand((int)band, freq, gainDb, q); }
+JNIEXPORT void JNICALL JNI_FN(setEqPreset)(JNIEnv* env, jobject thiz, jfloatArray jFreqs, jfloatArray jGains, jfloatArray jQs, jfloat preampDb) {
     if (!g_engine) return;
     jfloat* freqs = env->GetFloatArrayElements(jFreqs, nullptr);
     jfloat* gains = env->GetFloatArrayElements(jGains, nullptr);
-    jfloat* qs    = env->GetFloatArrayElements(jQs,    nullptr);
-    jsize   count = env->GetArrayLength(jFreqs);
-
-    for (int i = 0; i < count && i < ParametricEQ::BANDS; i++) {
-        g_engine->eq.setBand(i, freqs[i], gains[i], qs[i]);
-    }
+    jfloat* qs = env->GetFloatArrayElements(jQs, nullptr);
+    for (int i = 0; i < 10; i++) g_engine->eq.setBand(i, freqs[i], gains[i], qs[i]);
     g_engine->eq.setPreamp((float)preampDb);
-
     env->ReleaseFloatArrayElements(jFreqs, freqs, JNI_ABORT);
     env->ReleaseFloatArrayElements(jGains, gains, JNI_ABORT);
-    env->ReleaseFloatArrayElements(jQs,    qs,    JNI_ABORT);
-    LOGD("EQ preset loaded: preamp=%.1f dB", (float)preampDb);
+    env->ReleaseFloatArrayElements(jQs, qs, JNI_ABORT);
 }
-
-// ---- ReplayGain ----
-
-JNIEXPORT void JNICALL
-JNI_FN(setReplayGain)(JNIEnv* /*env*/, jobject /*thiz*/,
-                      jfloat trackGain, jfloat trackPeak,
-                      jfloat albumGain, jfloat albumPeak,
-                      jboolean useAlbumMode) {
+JNIEXPORT void JNICALL JNI_FN(setReplayGain)(JNIEnv* env, jobject thiz, jfloat trackGain, jfloat trackPeak, jfloat albumGain, jfloat albumPeak, jboolean useAlbumMode) {
     if (!g_engine) return;
     g_engine->replayGain.setTrackGain((float)trackGain, (float)trackPeak);
     g_engine->replayGain.setAlbumGain((float)albumGain, (float)albumPeak);
     g_engine->replayGain.setAlbumMode((bool)useAlbumMode);
 }
-
-// ---- Gapless ----
-
-JNIEXPORT void JNICALL
-JNI_FN(preloadNextTrack)(JNIEnv* env, jobject /*thiz*/,
-                         jstring jPath, jstring jFormat) {
+JNIEXPORT void JNICALL JNI_FN(preloadNextTrack)(JNIEnv* env, jobject thiz, jstring jPath, jstring jFormat) {
+    if (g_engine) g_engine->gapless.setNext(env->GetStringUTFChars(jPath, nullptr), env->GetStringUTFChars(jFormat, nullptr), 44100, 16);
+}
+JNIEXPORT void JNICALL JNI_FN(cancelPreload)(JNIEnv* env, jobject thiz) { if (g_engine) g_engine->gapless.clear(); }
+JNIEXPORT void JNICALL JNI_FN(setEndOfStream)(JNIEnv* env, jobject thiz, jboolean eos) { if (g_engine) g_engine->isEos.store(eos); }
+JNIEXPORT void JNICALL JNI_FN(setHardwareVolume)(JNIEnv* env, jobject thiz, jfloat vol) { if (g_engine) g_engine->masterVolume.store(vol); }
+JNIEXPORT void JNICALL JNI_FN(setCrossfeed)(JNIEnv* env, jobject thiz, jboolean enabled, jfloat cutFreq, jfloat feed) {
+    if (g_engine) { g_engine->crossfeed.enabled = (bool)enabled; g_engine->crossfeed.setParameters(cutFreq, feed); }
+}
+JNIEXPORT void JNICALL JNI_FN(fillBuffer)(JNIEnv* env, jobject thiz, jfloatArray samples) {
     if (!g_engine) return;
-    const char* path = env->GetStringUTFChars(jPath,   nullptr);
-    const char* fmt  = env->GetStringUTFChars(jFormat, nullptr);
-    g_engine->gapless.setNext(path, fmt, 44100, 16);
-    env->ReleaseStringUTFChars(jPath,   path);
-    env->ReleaseStringUTFChars(jFormat, fmt);
+    jfloat* data = env->GetFloatArrayElements(samples, nullptr);
+    g_engine->fillBuffer(data, env->GetArrayLength(samples));
+    env->ReleaseFloatArrayElements(samples, data, JNI_ABORT);
+}
+JNIEXPORT jint JNICALL JNI_FN(getActiveSampleRate)(JNIEnv* env, jobject thiz) { return g_engine ? (jint)g_engine->sampleRate : 0; }
+JNIEXPORT jint JNICALL JNI_FN(getActiveBitDepth)(JNIEnv* env, jobject thiz) { return g_engine ? (jint)g_engine->bitDepth : 0; }
+JNIEXPORT jfloat JNICALL JNI_FN(getPeakLevel)(JNIEnv* env, jobject thiz) { return g_engine ? g_engine->peakMeter.getPeak() : 0.0f; }
+JNIEXPORT jfloat JNICALL JNI_FN(getPeakLevelL)(JNIEnv* env, jobject thiz) { return g_engine ? g_engine->peakMeter.getPeakL() : 0.0f; }
+JNIEXPORT jfloat JNICALL JNI_FN(getPeakLevelR)(JNIEnv* env, jobject thiz) { return g_engine ? g_engine->peakMeter.getPeakR() : 0.0f; }
 }
 
-JNIEXPORT void JNICALL
-JNI_FN(cancelPreload)(JNIEnv* /*env*/, jobject /*thiz*/) {
-    if (g_engine) g_engine->gapless.clear();
-}
-
-// ---- USB DAC ----
-
-JNIEXPORT jboolean JNICALL
-JNI_FN(openUsbDac)(JNIEnv* env, jobject /*thiz*/,
-                   jstring jDevPath, jint vendorId, jint productId) {
-    if (!g_engine) return JNI_FALSE;
-    const char* path = env->GetStringUTFChars(jDevPath, nullptr);
-    // Re-open Oboe stream dengan USB output device
-    // AAudio exclusive mode ke device tertentu via device ID
-    // TODO: map vendorId/productId ke AAudio device ID via AudioManager
-    LOGI("USB DAC: %s (vid=%d pid=%d)", path, vendorId, productId);
-    env->ReleaseStringUTFChars(jDevPath, path);
-    return JNI_TRUE;
-}
-
-JNIEXPORT void JNICALL
-JNI_FN(closeUsbDac)(JNIEnv* /*env*/, jobject /*thiz*/) {
-    if (g_engine) {
-        // Kembali ke output internal
-        g_engine->openStream(g_engine->sampleRate, g_engine->bitDepth);
-        LOGI("USB DAC closed — kembali ke internal output");
-    }
-}
-
-JNIEXPORT void JNICALL
-JNI_FN(setHardwareVolume)(JNIEnv* /*env*/, jobject /*thiz*/, jfloat vol) {
-    if (g_engine) g_engine->masterVolume.store(vol);
-}
-
-// ---- Crossfeed ----
-
-JNIEXPORT void JNICALL
-JNI_FN(setCrossfeed)(JNIEnv* /*env*/, jobject /*thiz*/,
-                     jboolean enabled, jfloat cutFreq, jfloat feed) {
-    if (!g_engine) return;
-    g_engine->crossfeed.enabled = (bool)enabled;
-    g_engine->crossfeed.setParameters((float)cutFreq, (float)feed);
-    LOGD("Crossfeed: %s cutFreq=%.0f feed=%.2f",
-         enabled ? "ON" : "OFF", (float)cutFreq, (float)feed);
-}
-
-// ---- Info / Metering ----
-
-JNIEXPORT jint JNICALL
-JNI_FN(getActiveSampleRate)(JNIEnv* /*env*/, jobject /*thiz*/) {
-    return g_engine ? (jint)g_engine->sampleRate : 0;
-}
-
-JNIEXPORT jint JNICALL
-JNI_FN(getActiveBitDepth)(JNIEnv* /*env*/, jobject /*thiz*/) {
-    return g_engine ? (jint)g_engine->bitDepth : 0;
-}
-
-JNIEXPORT jfloat JNICALL
-JNI_FN(getPeakLevel)(JNIEnv* /*env*/, jobject /*thiz*/) {
-    return g_engine ? g_engine->peakMeter.getPeak() : 0.0f;
-}
-
-JNIEXPORT jfloat JNICALL
-JNI_FN(getPeakLevelL)(JNIEnv* /*env*/, jobject /*thiz*/) {
-    return g_engine ? g_engine->peakMeter.getPeakL() : 0.0f;
-}
-
-JNIEXPORT jfloat JNICALL
-JNI_FN(getPeakLevelR)(JNIEnv* /*env*/, jobject /*thiz*/) {
-    return g_engine ? g_engine->peakMeter.getPeakR() : 0.0f;
-}
-
-} // extern "C"

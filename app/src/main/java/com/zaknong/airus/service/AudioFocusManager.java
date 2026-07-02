@@ -88,8 +88,8 @@ public class AudioFocusManager {
 
         focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(playbackAttributes)
-                .setAcceptsDelayedFocusGain(true)       // terima fokus saat telepon selesai
-                .setWillPauseWhenDucked(true)            // Airus pause saat di-duck, bukan kecilkan volume
+                .setAcceptsDelayedFocusGain(true)
+                .setWillPauseWhenDucked(false) // Handle ducking manually
                 .setOnAudioFocusChangeListener(focusChangeListener)
                 .build();
 
@@ -161,12 +161,17 @@ public class AudioFocusManager {
                             break;
 
                         case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
-                            // Fokus hilang sementara tapi boleh "duck" (kecilkan volume)
-                            // Kita set willPauseWhenDucked=true di atas, jadi ini seharusnya tidak terjadi
-                            // Tapi kita handle untuk keamanan
-                            hasFocus = false;
-                            Log.d(TAG, "Focus LOSS transient (can duck) — pausing anyway");
-                            listener.onAudioFocusLostTransient(true);
+                            // Jika mode normal (suara aktif), maka duck. Jika getar/silent, abaikan.
+                            int ringerMode = audioManager.getRingerMode();
+                            if (ringerMode == AudioManager.RINGER_MODE_NORMAL) {
+                                Log.d(TAG, "Focus LOSS transient (can duck) — ducking volume");
+                                listener.onAudioFocusLostTransient(true);
+                            } else {
+                                Log.d(TAG, "Focus LOSS transient (can duck) — silent mode, ignoring");
+                                // Tetap anggap punya fokus penuh
+                                hasFocus = true;
+                                listener.onAudioFocusGained();
+                            }
                             break;
 
                         default:

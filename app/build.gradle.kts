@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.kapt)
+    alias(libs.plugins.compose.compiler)
 }
 
 android {
@@ -71,16 +72,17 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     kotlinOptions {
-        jvmTarget = "17"
+        jvmTarget = "21"
     }
 
     buildFeatures {
         viewBinding = true   // untuk binding layout tanpa findViewById
+        compose = true
     }
 
     packaging {
@@ -99,6 +101,20 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.fragment)
     implementation(libs.androidx.activity)
+    implementation(libs.androidx.activity.compose)
+
+    // === Compose ===
+    implementation(libs.compose.runtime)
+    implementation(libs.compose.runtime.livedata)
+    implementation(libs.compose.foundation)
+    implementation(libs.compose.ui)
+    implementation(libs.compose.animation)
+    implementation(libs.compose.material3)
+    implementation(libs.navigation.compose)
+
+    // === Coil ===
+    implementation(libs.coil.compose)
+    implementation(libs.coil.network.okhttp)
 
     // === Navigation Component ===
     implementation(libs.navigation.fragment)

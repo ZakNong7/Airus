@@ -17,6 +17,7 @@ import com.zaknong.airus.database.AppDatabase;
 import com.zaknong.airus.database.entity.Song;
 import com.zaknong.airus.engine.AudioEngine;
 import com.zaknong.airus.engine.AudioFormatRouter;
+import com.zaknong.airus.engine.MediaCodecDecoder;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -128,9 +129,7 @@ public class PlayerService extends LifecycleService
     private NotificationBuilder notificationBuilder;
     private AppDatabase database;
     private AudioEngine audioEngine;
-
-    // AudioEngine akan ditambahkan di Tahap 4 (JNI):
-    // private AudioEngine audioEngine;
+    private MediaCodecDecoder mediaCodecDecoder;
 
     // =========================================================
     // Queue
@@ -198,11 +197,12 @@ public class PlayerService extends LifecycleService
         audioEngine = new AudioEngine();
         audioEngine.initialize();
         audioEngine.setEngineCallback(engineCallback);
+        mediaCodecDecoder = new MediaCodecDecoder(this, audioEngine);
 
         // Observe bit-perfect state untuk update notification
         playerState.isBitPerfectActive().observe(this, isBitPerfect -> {
             // Saat bit-perfect di-toggle, update EQ di native engine
-            // Tahap 4: audioEngine.setEqEnabled(!isBitPerfect);
+            audioEngine.setEqEnabled(!isBitPerfect);
             refreshNotification();
             Log.d(TAG, "Bit-perfect: " + isBitPerfect);
         });
@@ -275,6 +275,7 @@ public class PlayerService extends LifecycleService
         originalQueue.addAll(songs);
         currentIndex = startIndex;
 
+        playerState.setQueue(new ArrayList<>(queue));
         playerState.setQueueSize(queue.size());
         playerState.setQueueIndex(currentIndex);
 
@@ -297,7 +298,7 @@ public class PlayerService extends LifecycleService
             // Resume
             boolean hasFocus = audioFocusManager.requestAudioFocus();
             if (hasFocus) {
-                // Tahap 4: audioEngine.resume();
+                audioEngine.resume();
                 playerState.setPlaybackState(PlayerState.State.PLAYING);
                 mediaSessionManager.setPlaybackState(
                         PlaybackStateCompat.STATE_PLAYING,
@@ -322,7 +323,7 @@ public class PlayerService extends LifecycleService
      * @param byUnplug    true jika pause karena headphone dicabut
      */
     private void pause(boolean byFocusLoss, boolean byUnplug) {
-        // Tahap 4: audioEngine.pause();
+        audioEngine.pause();
         playerState.setPlaybackState(PlayerState.State.PAUSED);
         mediaSessionManager.setPlaybackState(
                 PlaybackStateCompat.STATE_PAUSED,
@@ -338,7 +339,8 @@ public class PlayerService extends LifecycleService
     }
 
     public void stop() {
-        // Tahap 4: audioEngine.stop();
+        audioEngine.stop();
+        mediaCodecDecoder.stop();
         audioFocusManager.abandonAudioFocus();
         playerState.setPlaybackState(PlayerState.State.IDLE);
         playerState.reset();
@@ -351,6 +353,7 @@ public class PlayerService extends LifecycleService
         if (queue.isEmpty()) return;
 
         PlayerState.RepeatMode repeat = playerState.getRepeatMode().getValue();
+        if (repeat == null) repeat = PlayerState.RepeatMode.OFF;
 
         if (repeat == PlayerState.RepeatMode.ONE) {
             // Repeat one: putar ulang lagu yang sama
@@ -360,13 +363,16 @@ public class PlayerService extends LifecycleService
 
         if (currentIndex < queue.size() - 1) {
             currentIndex++;
-        } else if (repeat == PlayerState.RepeatMode.ALL) {
-            currentIndex = 0;
         } else {
-            // Sudah lagu terakhir, tidak repeat
-            Log.d(TAG, "Queue ended");
-            pause();
-            return;
+            // Sudah lagu terakhir
+            if (repeat == PlayerState.RepeatMode.ALL) {
+                currentIndex = 0;
+            } else {
+                // Stop at end
+                pause();
+                seekTo(0);
+                return;
+            }
         }
 
         playerState.setQueueIndex(currentIndex);
@@ -394,7 +400,31 @@ public class PlayerService extends LifecycleService
     }
 
     public void seekTo(long positionMs) {
-        // Tahap 4: audioEngine.seekTo(positionMs);
+        Song song = playerState.getCurrentSong().getValue();
+        if (song != null) {
+            AudioFormatRouter.FormatInfo formatInfo =
+                    AudioFormatRouter.getFormatInfo(song.filePath);
+            if (formatInfo != null && formatInfo.decoderPath == AudioFormatRouter.DecoderPath.MEDIA_CODEC) {
+                mediaCodecDecoder.seekTo(positionMs);
+                audioEngine.seekTo(positionMs, -1);
+            } else {
+                int fd = -1;
+                android.os.ParcelFileDescriptor pfd = null;
+                try {
+                    if (song.filePath.startsWith("content://")) {
+                        pfd = getContentResolver().openFileDescriptor(android.net.Uri.parse(song.filePath), "r");
+                        if (pfd != null) {
+                            fd = pfd.detachFd();
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Gagal mendapatkan fd untuk seek", e);
+                }
+                audioEngine.seekTo(positionMs, fd);
+            }
+        } else {
+            audioEngine.seekTo(positionMs, -1);
+        }
         playerState.setPosition(positionMs);
         mediaSessionManager.setPlaybackState(
                 playerState.isPlaying()
@@ -415,7 +445,7 @@ public class PlayerService extends LifecycleService
         // Jika bit-perfect OFF → EQ bisa aktif
         if (newValue) {
             playerState.setEqActive(false);
-            // Tahap 4: audioEngine.setEqEnabled(false);
+            audioEngine.setEqEnabled(false);
         }
 
         Log.d(TAG, "Bit-perfect toggled: " + newValue);
@@ -428,6 +458,12 @@ public class PlayerService extends LifecycleService
         if (current == PlayerState.ShuffleMode.OFF) {
             // Aktifkan shuffle
             Song currentSong = queue.get(currentIndex);
+            
+            // Backup original queue if not already backed up
+            if (originalQueue.isEmpty()) {
+                originalQueue.addAll(queue);
+            }
+            
             Collections.shuffle(queue);
             // Pastikan lagu yang sedang main tetap di posisi 0
             queue.remove(currentSong);
@@ -436,14 +472,18 @@ public class PlayerService extends LifecycleService
             playerState.setShuffleMode(PlayerState.ShuffleMode.ON);
         } else {
             // Kembalikan urutan original
-            Song currentSong = queue.get(currentIndex);
+            Song currentSong = (currentIndex >= 0 && currentIndex < queue.size()) ? queue.get(currentIndex) : null;
             queue.clear();
             queue.addAll(originalQueue);
-            currentIndex = queue.indexOf(currentSong);
+            
+            if (currentSong != null) {
+                currentIndex = queue.indexOf(currentSong);
+            }
             if (currentIndex < 0) currentIndex = 0;
             playerState.setShuffleMode(PlayerState.ShuffleMode.OFF);
         }
 
+        playerState.setQueue(new ArrayList<>(queue));
         playerState.setQueueIndex(currentIndex);
         playerState.setQueueSize(queue.size());
     }
@@ -461,6 +501,32 @@ public class PlayerService extends LifecycleService
 
         playerState.setRepeatMode(next);
         Log.d(TAG, "Repeat mode: " + next);
+    }
+
+    public void toggleFavorite() {
+        Song song = playerState.getCurrentSong().getValue();
+        if (song == null) return;
+
+        boolean newFav = !song.isFavorite;
+        
+        // Create a shallow copy to trigger LiveData change detection
+        Song updatedSong = new Song();
+        updatedSong.id = song.id;
+        updatedSong.filePath = song.filePath;
+        updatedSong.title = song.title;
+        updatedSong.artist = song.artist;
+        updatedSong.album = song.album;
+        updatedSong.albumArtPath = song.albumArtPath;
+        updatedSong.durationMs = song.durationMs;
+        updatedSong.format = song.format;
+        updatedSong.isFavorite = newFav;
+
+        AppDatabase.databaseWriteExecutor.execute(() ->
+                database.songDao().setFavorite(song.id, newFav)
+        );
+        
+        playerState.setCurrentSong(updatedSong);
+        refreshNotification();
     }
 
     // =========================================================
@@ -535,17 +601,21 @@ public class PlayerService extends LifecycleService
      * Detail implementasi di Tahap 4.
      */
     private void startMediaCodecPlayback(Song song) {
+        mediaCodecDecoder.stop(); // Stop any previous decode
         audioEngine.setReplayGain(
                 song.rgTrackGain, song.rgTrackPeak,
                 song.rgAlbumGain, song.rgAlbumPeak,
                 false
         );
-        boolean ok = audioEngine.playMediaCodec(song.filePath);
+        boolean ok = audioEngine.playMediaCodec(song.filePath, song.sampleRate, song.bitDepth);
         if (!ok) {
             playerState.setPlaybackState(PlayerState.State.ERROR);
             playerState.setLastError(PlayerState.PlayerError.DECODE_ERROR);
             return;
         }
+        
+        mediaCodecDecoder.start(song.filePath);
+        
         playerState.setPlaybackState(PlayerState.State.PLAYING);
         mediaSessionManager.setPlaybackState(
                 PlaybackStateCompat.STATE_PLAYING, 0, 1.0f);
@@ -560,12 +630,29 @@ public class PlayerService extends LifecycleService
      */
     private void startNativePlayback(Song song,
                                      AudioFormatRouter.FormatInfo info) {
+        mediaCodecDecoder.stop(); // Pastikan jalur media codec mati
         audioEngine.setReplayGain(
                 song.rgTrackGain, song.rgTrackPeak,
                 song.rgAlbumGain, song.rgAlbumPeak,
                 false
         );
-        boolean ok = audioEngine.playNative(song.filePath, info.displayName);
+
+        int fd = -1;
+        android.os.ParcelFileDescriptor pfd = null;
+        try {
+            if (song.filePath.startsWith("content://")) {
+                pfd = getContentResolver().openFileDescriptor(android.net.Uri.parse(song.filePath), "r");
+            } else {
+                pfd = getContentResolver().openFileDescriptor(android.net.Uri.fromFile(new java.io.File(song.filePath)), "r");
+            }
+            if (pfd != null) {
+                fd = pfd.detachFd();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Gagal membuka FileDescriptor untuk " + song.filePath, e);
+        }
+
+        boolean ok = audioEngine.playNative(song.filePath, fd, info.displayName, song.sampleRate, song.bitDepth);
         if (!ok) {
             playerState.setPlaybackState(PlayerState.State.ERROR);
             playerState.setLastError(PlayerState.PlayerError.DECODE_ERROR);
@@ -643,15 +730,6 @@ public class PlayerService extends LifecycleService
     // =========================================================
 
     @Override
-    public void onAudioFocusGained() {
-        // Auto-resume hanya jika pause karena focus loss (bukan unplug)
-        if (pausedByFocusLoss && !pausedByUnplug) {
-            Log.d(TAG, "Focus regained — auto-resuming");
-            play();
-        }
-    }
-
-    @Override
     public void onAudioFocusLost() {
         // Focus hilang permanen — pause, tidak auto-resume
         if (playerState.isPlaying()) {
@@ -661,9 +739,26 @@ public class PlayerService extends LifecycleService
 
     @Override
     public void onAudioFocusLostTransient(boolean canDuck) {
-        // Focus hilang sementara — pause dengan flag agar auto-resume nanti
-        if (playerState.isPlaying()) {
-            pause(true, false);
+        if (canDuck) {
+            // Ducking: turunkan volume ke 20%
+            audioEngine.setHardwareVolume(0.2f);
+        } else {
+            // Focus hilang sementara — pause dengan flag agar auto-resume nanti
+            if (playerState.isPlaying()) {
+                pause(true, false);
+            }
+        }
+    }
+
+    @Override
+    public void onAudioFocusGained() {
+        // Kembalikan volume normal jika sebelumnya sedang ducking
+        audioEngine.setHardwareVolume(1.0f);
+        
+        // Auto-resume hanya jika pause karena focus loss (bukan unplug)
+        if (pausedByFocusLoss && !pausedByUnplug) {
+            Log.d(TAG, "Focus regained — auto-resuming");
+            play();
         }
     }
 
@@ -765,6 +860,14 @@ public class PlayerService extends LifecycleService
         if (repeat == PlayerState.RepeatMode.ALL) return queue.get(0);
         return null;
     }
+    public void skipToQueueItem(int index) {
+        if (index >= 0 && index < queue.size()) {
+            currentIndex = index;
+            playerState.setQueueIndex(currentIndex);
+            playCurrent();
+        }
+    }
+
     public AudioEngine getAudioEngine() {
         return audioEngine;
     }

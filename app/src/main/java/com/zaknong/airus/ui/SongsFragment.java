@@ -14,6 +14,8 @@ import android.widget.ImageView;
 import android.widget.PopupMenu;
 import android.widget.TextView;
 
+import com.google.android.material.chip.ChipGroup;
+
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
@@ -35,9 +37,36 @@ public class SongsFragment extends Fragment {
     private RecyclerView      recyclerSongs;
     private SwipeRefreshLayout swipeRefresh;
     private SongAdapter        adapter;
+    private TextView           tvQuote, tvQuoteAuthor;
+    private ChipGroup          chipGroup;
 
     private PlayerService playerService;
     private boolean       serviceBound = false;
+
+    private static final String[][] QUOTES = {
+            {"\"Where words fail, music speaks.\"", "Hans Christian Andersen"},
+            {"\"Music is the moonlight in the gloomy night of life.\"", "Jean Paul"},
+            {"\"Life is one grand, sweet song, so just start the music.\"", "Ronald Reagan"},
+            {"\"Music is the shorthand of emotion.\"", "Leo Tolstoy"},
+            {"\"One good thing about music, when it hits you, you feel no pain.\"", "Bob Marley"},
+            {"\"Music is the wine that fills the cup of silence.\"", "Robert Fripp"},
+            {"\"Without music, life would be a mistake.\"", "Friedrich Nietzsche"}
+    };
+
+    private final SongAdapter.OnSongClickListener songClickListener = song -> {
+        android.util.Log.d("AIRUS_DEBUG", "onSongClick START: " + song.title
+                + " | fragment=" + System.identityHashCode(SongsFragment.this));
+
+        if (!serviceBound || playerService == null) {
+            android.util.Log.e("AIRUS_DEBUG", "Service not bound!");
+            return;
+        }
+
+        List<Song> songs = adapter.getSongs();
+        int index = songs.indexOf(song);
+        android.util.Log.d("AIRUS_DEBUG", "index=" + index + " total=" + songs.size());
+        playerService.playQueue(songs, index);
+    };
 
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override
@@ -56,8 +85,9 @@ public class SongsFragment extends Fragment {
     public View onCreateView(@NonNull LayoutInflater inflater,
                              @Nullable ViewGroup container,
                              @Nullable Bundle savedInstanceState) {
+        android.util.Log.d("AIRUS_DEBUG", "SongsFragment onCreateView");
         return inflater.inflate(R.layout.fragment_songs, container, false);
-    }
+        }
 
     @Override
     public void onViewCreated(@NonNull View view,
@@ -66,58 +96,73 @@ public class SongsFragment extends Fragment {
 
         recyclerSongs = view.findViewById(R.id.recycler_songs);
         swipeRefresh  = view.findViewById(R.id.swipe_refresh);
-        final SongAdapter[] adapterRef = new SongAdapter[1];
+        tvQuote       = view.findViewById(R.id.tv_quote);
+        tvQuoteAuthor = view.findViewById(R.id.tv_quote_author);
+        chipGroup     = view.findViewById(R.id.chip_group_tabs);
 
-        // Setup RecyclerView
-        adapterRef[0] = new SongAdapter(song -> {
-            try {
-                android.util.Log.d("AIRUS_DEBUG", "onSongClick START: " + song.title);
+        setupHeader();
+        setupTabs();
 
-                if (!serviceBound || playerService == null) {
-                    android.util.Log.e("AIRUS_DEBUG", "Service not bound!");
-                    return;
-                }
+        adapter = new SongAdapter(songClickListener);
 
-                // Gunakan adapterRef[0] bukan adapter
-                List<Song> songs = adapterRef[0].getSongs();
-                int index = songs.indexOf(song);
-                android.util.Log.d("AIRUS_DEBUG", "index=" + index + " total=" + songs.size());
-                playerService.playQueue(songs, index);
-
-            } catch (Exception e) {
-                android.util.Log.e("AIRUS_DEBUG", "EXCEPTION: " + e.getMessage(), e);
-                e.printStackTrace();
-            }
-        });
-
-        adapter = adapterRef[0];
-        recyclerSongs.setLayoutManager(
-                new LinearLayoutManager(requireContext()));
+        recyclerSongs.setLayoutManager(new LinearLayoutManager(requireContext()));
         recyclerSongs.setAdapter(adapter);
-        recyclerSongs.setHasFixedSize(true);
 
         // SwipeRefresh warna
         swipeRefresh.setColorSchemeResources(R.color.accent_primary);
         swipeRefresh.setBackgroundColor(
                 getResources().getColor(R.color.black_true, null));
-        swipeRefresh.setOnRefreshListener(() -> {
-            swipeRefresh.setRefreshing(false); // scan via LibraryFragment
-        });
+        swipeRefresh.setOnRefreshListener(() ->
+                swipeRefresh.setRefreshing(false));
 
-        // Observe lagu dari database
-        AppDatabase.getInstance(requireContext())
-                .songDao()
-                .getAllSongsAlpha()
-                .observe(getViewLifecycleOwner(), songs -> {
-                    android.util.Log.d("AIRUS_DEBUG",
-                            "Songs loaded from DB: " + (songs != null ? songs.size() : 0));
-                    adapter.setSongs(songs);
-                });
+        // Default: Observe All Songs
+        observeSongs(0);
+    }
+
+    private void setupHeader() {
+        int randomIndex = (int) (Math.random() * QUOTES.length);
+        tvQuote.setText(QUOTES[randomIndex][0]);
+        tvQuoteAuthor.setText("— " + QUOTES[randomIndex][1]);
+    }
+
+    private void setupTabs() {
+        chipGroup.check(R.id.chip_all);
+        chipGroup.setOnCheckedChangeListener((group, checkedId) -> {
+            if (checkedId == R.id.chip_all) {
+                observeSongs(0);
+            } else if (checkedId == R.id.chip_recent) {
+                observeSongs(1);
+            } else if (checkedId == R.id.chip_favorites) {
+                observeSongs(2);
+            }
+        });
+    }
+
+    private void observeSongs(int type) {
+        // Remove previous observers
+        AppDatabase.getInstance(requireContext()).songDao().getAllSongsAlpha().removeObservers(getViewLifecycleOwner());
+        AppDatabase.getInstance(requireContext()).songDao().getAllSongsRecent().removeObservers(getViewLifecycleOwner());
+        AppDatabase.getInstance(requireContext()).songDao().getFavoriteSongs().removeObservers(getViewLifecycleOwner());
+
+        androidx.lifecycle.LiveData<List<Song>> liveData;
+        if (type == 1) {
+            liveData = AppDatabase.getInstance(requireContext()).songDao().getAllSongsRecent();
+        } else if (type == 2) {
+            liveData = AppDatabase.getInstance(requireContext()).songDao().getFavoriteSongs();
+        } else {
+            liveData = AppDatabase.getInstance(requireContext()).songDao().getAllSongsAlpha();
+        }
+
+        liveData.observe(getViewLifecycleOwner(), songs -> {
+            android.util.Log.d("AIRUS_DEBUG", "Songs loaded (" + type + "): " + (songs != null ? songs.size() : 0));
+            adapter.setSongs(songs);
+        });
     }
 
     @Override
     public void onStart() {
         super.onStart();
+        android.util.Log.d("AIRUS_DEBUG", "SongsFragment onStart, serviceBound=" + serviceBound);
         requireContext().bindService(
                 new Intent(requireContext(), PlayerService.class),
                 serviceConnection, Context.BIND_AUTO_CREATE
@@ -149,6 +194,8 @@ public class SongsFragment extends Fragment {
 
         public SongAdapter(OnSongClickListener listener) {
             this.listener = listener;
+            android.util.Log.d("AIRUS_DEBUG", "SongAdapter created, listener="
+                    + (listener != null ? "OK" : "NULL"));
         }
 
         public void setSongs(List<Song> newSongs) {
@@ -169,8 +216,9 @@ public class SongsFragment extends Fragment {
         }
 
         @Override
-        public void onBindViewHolder(@NonNull SongViewHolder holder,
-                                     int position) {
+        public void onBindViewHolder(@NonNull SongViewHolder holder, int position) {
+            android.util.Log.d("AIRUS_DEBUG", "onBind pos=" + position
+                    + " listener=" + System.identityHashCode(listener));
             holder.bind(songs.get(position), listener);
         }
 
@@ -238,8 +286,11 @@ public class SongsFragment extends Fragment {
 
                 });
                 itemView.setOnClickListener(v -> {
-                    android.util.Log.d("AIRUS_DEBUG", "TAPPED song: " + song.title); // ← ubah jadi TAPPED
+                    android.util.Log.d("AIRUS_DEBUG", "TAPPED_XYZ_999: " + song.title);
+                    android.util.Log.d("AIRUS_DEBUG", "BEFORE_LISTENER_CALL");
+                    android.util.Log.d("AIRUS_DEBUG", "listener hash=" + System.identityHashCode(listener));
                     listener.onSongClick(song);
+                    android.util.Log.d("AIRUS_DEBUG", "AFTER_LISTENER_CALL");
                 });
             }
         }
