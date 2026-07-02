@@ -56,7 +56,7 @@ Airus dibangun dengan prinsip pengembangan Android modern:
 ### Langkah Instalasi
 1.  Clone repositori ini:
     ```bash
-    git clone https://github.com/zakky/Airus.git
+    git clone https://github.com/ZakNong7/Airus.git
     ```
 2.  Buka proyek di Android Studio.
 3.  Tunggu sinkronisasi Gradle selesai.
@@ -73,4 +73,4 @@ Proyek ini dilisensikan di bawah [MIT License](LICENSE).
 
 ---
 **Airus** - *Experience Music the Right Way.*
-Dibuat oleh [Zakky](https://github.com/zakky)
+Dibuat oleh [ZakNong7](https://github.com/ZakNong7)
